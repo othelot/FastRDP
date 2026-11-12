@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/transport",
+    "crates/frame-shm",
+    "crates/encoder",
+    "crates/provider",
+    "crates/server",
+    "crates/client",
+    "crates/agent",
+    "crates/update",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+protocol = { path = "crates/protocol" }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+windows = { version = "0.62" }
+windows-core = { version = "0.62" }
+windows-sys = { version = "0.61" }
+
+[workspace.lints.clippy]
+# `as_chunks` needs Rust 1.88; chunks_exact with a constant size is fine
+chunks_exact_to_as_chunks = "allow"
+
+[profile.release]
+# panic must unwind so every COM entry point can catch_unwind instead of aborting svchost.
+panic = "unwind"
+debug = "line-tables-only"
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+panic = "unwind"

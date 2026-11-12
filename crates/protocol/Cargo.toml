@@ -1,0 +1,16 @@
+[package]
+name = "protocol"
+description = "FastRDP wire protocol: messages and framing shared by provider, server, client and agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+tokio = ["dep:tokio"]
+
+[dependencies]
+tokio = { version = "1", features = ["io-util"], optional = true }
+
+[lints]
+workspace = true

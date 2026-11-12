@@ -1,0 +1,6 @@
+# Deploy: cd web; npx wrangler deploy   (fastrdp.dev must be a zone in the same Cloudflare account)
+name = "fastrdp-dev"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = false
+routes = [{ pattern = "fastrdp.dev", custom_domain = true }]

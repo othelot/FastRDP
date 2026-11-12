@@ -1,0 +1,38 @@
+[package]
+name = "client"
+description = "FastRDP client: iced GUI (cross-platform) or --headless; QUIC + FEC video, keyboard/mouse input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fastrdp-client"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { workspace = true, features = ["tokio"] }
+transport = { path = "../transport" }
+arboard = "3"
+bytes = "1"
+clap.workspace = true
+iced = { version = "0.14", features = ["wgpu", "tokio", "advanced", "canvas"] }
+openh264 = "0.9"
+update = { path = "../update" }
+quinn = "0.11"
+rpassword = "7"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+
+[dev-dependencies]
+iced_test = "0.14"
+naga = { version = "27", features = ["wgsl-in"] }
+
+[target.'cfg(windows)'.dependencies]
+frame-shm = { path = "../frame-shm" }
+raw-window-handle = "0.6"
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[lints]
+workspace = true

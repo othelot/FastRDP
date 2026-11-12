@@ -1,0 +1,73 @@
+;
+; FastRdpIdd.inf - FastRDP Remote Indirect Display Driver (UMDF 2 + IddCx)
+;
+; The hardware id has NO "Root\" prefix: the device is created by the Windows remote desktop stack
+; as SWD\RemoteDisplayEnum\FastRDP_RemoteIDD&SessionId_NNNN when the FastRDP protocol provider
+; returns "FastRDP_RemoteIDD" from IWRdsWddmIddProps::GetHardwareId.
+; Layout mirrors the inbox remote IDD (rdpidd.inf): one host process per session, IndirectKmd filter.
+;
+
+[Version]
+PnpLockdown=1
+Signature="$Windows NT$"
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Class=Display
+ClassVer=2.0
+Provider=%ManufacturerName%
+CatalogFile=FastRdpIdd.cat
+DriverVer=
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$.10.0...22000
+
+[Standard.NT$ARCH$.10.0...22000]
+%DeviceName%=FastRdpIdd_Install, FastRDP_RemoteIDD
+
+[SourceDisksFiles]
+FastRdpIdd.dll=1
+
+[SourceDisksNames]
+1=%DiskName%
+
+[FastRdpIdd_Install.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+CopyFiles=UMDriverCopy
+
+[FastRdpIdd_Install.NT.hw]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg=FastRdpIdd_HardwareDeviceSettings
+
+[FastRdpIdd_HardwareDeviceSettings]
+HKR,,"UpperFilters",%REG_MULTI_SZ%,"IndirectKmd"
+; Device object access: SYSTEM, Administrators, NETWORK SERVICE (TermService), LOCAL SERVICE (WUDFHost)
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;NS)(A;;GA;;;LS)"
+
+[FastRdpIdd_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[FastRdpIdd_Install.NT.Wdf]
+UmdfService=FastRdpIdd,FastRdpIdd_UmdfInstall
+UmdfServiceOrder=FastRdpIdd
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+; Remote IDDs: one WUDFHost per session (Microsoft recommendation), no DeviceGroupId.
+UmdfHostProcessSharing=ProcessSharingDisabled
+
+[FastRdpIdd_UmdfInstall]
+UmdfLibraryVersion=$UMDFVERSION$
+ServiceBinary=%13%\FastRdpIdd.dll
+UmdfExtensions=IddCx0102
+
+[DestinationDirs]
+UMDriverCopy=13
+
+[UMDriverCopy]
+FastRdpIdd.dll
+
+[Strings]
+ManufacturerName="FastRDP"
+DiskName="FastRDP Remote IDD Installation Disk"
+DeviceName="FastRDP Remote Display Adapter"
+REG_MULTI_SZ=0x00010000

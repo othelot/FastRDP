@@ -1,0 +1,32 @@
+[package]
+name = "server"
+description = "FastRDP server service: QUIC endpoint, session relay to the provider pipe, frame capture -> encoder -> FEC datagrams, input and channel relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+protocol = { workspace = true, features = ["tokio"] }
+encoder = { path = "../encoder" }
+transport = { path = "../transport" }
+frame-shm = { path = "../frame-shm" }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+bytes = "1"
+sha2 = "0.10"
+windows-service = "0.8"
+
+[dependencies.windows-sys]
+workspace = true
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes"]
+
+[[bin]]
+name = "fastrdp-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true

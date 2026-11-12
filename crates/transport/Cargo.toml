@@ -1,0 +1,13 @@
+[package]
+name = "transport"
+description = "FastRDP video datagrams: fragmentation + Reed-Solomon FEC + reassembly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reed-solomon-erasure = "6"
+
+[lints]
+workspace = true

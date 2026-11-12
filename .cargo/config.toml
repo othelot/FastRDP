@@ -1,0 +1,4 @@
+# Static CRT: the provider DLL is loaded into TermService's svchost on machines that may not have
+# the VC++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Driver.cpp" />
+    <ClCompile Include="FramePublisher.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Driver.h" />
+    <ClInclude Include="FramePublisher.h" />
+    <ClInclude Include="FastRdpShm.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="FastRdpIdd.inf" />
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{6B4C8E21-3F0A-4D7B-9C55-2E1F0A9B7D34}</ProjectGuid>
+    <TemplateGuid>{32909489-7be5-497b-aafa-db6669d9b44b}</TemplateGuid>
+    <RootNamespace>FastRdpIdd</RootNamespace>
+    <Configuration>Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+  </PropertyGroup>
+  <PropertyGroup Label="PropertySheets">
+    <PlatformToolset>WindowsUserModeDriver10.0</PlatformToolset>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+    <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
+    <UMDF_VERSION_MINOR>25</UMDF_VERSION_MINOR>
+    <IndirectDisplayDriver>true</IndirectDisplayDriver>
+    <IDDCX_VERSION_MAJOR>1</IDDCX_VERSION_MAJOR>
+    <IDDCX_VERSION_MINOR>10</IDDCX_VERSION_MINOR>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+    <TargetName>FastRdpIdd</TargetName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <!-- build output under the workspace target directory (ignored by git) -->
+    <OutDir>$(MSBuildThisFileDirectory)..\..\target\driver\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\target\driver\obj\$(Configuration)\</IntDir>
+    <!-- Signing and INF verification are done by Build-FastRdpIdd.ps1 (self-signed certificate, standalone infverif). -->
+    <SignMode>Off</SignMode>
+    <SkipPackageVerification>true</SkipPackageVerification>
+    <EnableInf2cat>false</EnableInf2cat>
+    <RunCodeAnalysis>true</RunCodeAnalysis>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <PreprocessorDefinitions>_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/D_ATL_NO_WIN_SUPPORT /DUMDF_DRIVER /DIDDCX_VERSION_MAJOR=1 /DIDDCX_VERSION_MINOR=10 /DIDDCX_MINIMUM_VERSION_REQUIRED=4 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>%(AdditionalDependencies);OneCoreUAP.lib;avrt.lib</AdditionalDependencies>
+      <!-- only the PDB file name in the DLL, not the build machine's path (%25 = %) -->
+      <AdditionalOptions>/PDBALTPATH:%25_PDB%25 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

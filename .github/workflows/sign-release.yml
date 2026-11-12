@@ -1,0 +1,66 @@
+# Signs a draft release and publishes it.
+#
+# tools/New-FastRdpRelease.ps1 -Publish uploads the release files as a draft and starts this workflow.
+# The job runs in the "release" environment (required reviewer: the maintainer), which holds the
+# Ed25519 private key FASTRDP_RELEASE_KEY (PEM). It writes manifest.json (version, tag, SHA-256 and
+# size of every release file) and manifest.json.sig ("ed25519 <key id> <base64 signature>"), which
+# fastrdp-update and the client verify against the public keys in crates/update/src/keys.rs.
+name: Sign release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Draft release tag, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Download release files
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag $TAG"; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
+          rm -f assets/manifest.json assets/manifest.json.sig
+          ls -l assets
+
+      - name: Write manifest
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, os
+          tag = os.environ["TAG"]
+          files = {}
+          for name in sorted(os.listdir("assets")):
+              data = open(os.path.join("assets", name), "rb").read()
+              files[name] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+          manifest = {"format": 1, "version": tag[1:], "tag": tag, "files": files}
+          with open("manifest.json", "w", newline="\n") as f:
+              f.write(json.dumps(manifest, indent=2) + "\n")
+          EOF
+          cat manifest.json
+
+      - name: Sign manifest
+        env:
+          SIGNING_KEY: ${{ secrets.FASTRDP_RELEASE_KEY }}
+        run: |
+          umask 077
+          trap 'rm -f key.pem' EXIT
+          printf '%s\n' "$SIGNING_KEY" > key.pem
+          openssl pkey -in key.pem -pubout -outform DER | tail -c 32 > pub.raw
+          keyid=$(sha256sum pub.raw | cut -c1-16)
+          openssl pkeyutl -sign -inkey key.pem -rawin -in manifest.json -out sig.raw
+          printf 'ed25519 %s %s\n' "$keyid" "$(base64 -w0 sig.raw)" > manifest.json.sig
+          echo "signed with key $keyid ($(base64 -w0 pub.raw))"
+
+      - name: Upload and publish
+        run: |
+          gh release upload "$TAG" manifest.json manifest.json.sig --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
