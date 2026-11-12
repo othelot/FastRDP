@@ -308,6 +308,10 @@ impl Nvenc {
         h.idr_period = gop;
         h.flags |= sys::H264_REPEAT_SPSPPS;
         h.entropy_coding_mode = sys::H264_ENTROPY_CABAC;
+        // Level 5.2 at most: automatic selection writes 6.x into the SPS for e.g. 3456x2160@120
+        // (macroblock rate above 5.2's), and OpenH264 - the client's decoder - rejects every 6.x
+        // stream (black picture). The decoder only needs the level for its buffer sizes.
+        h.level = sys::H264_LEVEL_52;
         // initialization
         let init = &mut *me.init;
         init.version = sys::INITIALIZE_PARAMS_VER;
