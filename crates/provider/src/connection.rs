@@ -281,12 +281,10 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
             d.HRes = self.client.width;
             d.VRes = self.client.height;
             copy_to_wchar_array(&mut d.ProtocolName, &crate::PROTOCOL_NAME.encode_utf16().collect::<Vec<_>>());
-            // Session arbitration only reconnects a connection to sessions of the same protocol type
-            // (console excepted): with the incoming value a user's RDP session was never taken over
-            // (a new session was created instead), and RDP never picked up FastRDP's sessions.
-            // FastRDP sessions are remote desktop sessions like RDP's.
+            // ProtocolType stays as TermService sets it. Reporting RDP (2) did not make Windows hand
+            // over a user's RDP session, and a FastRDP session then started next to an active RDP
+            // session without the single-session prompt - never weaken Windows' session limits.
             let incoming_type = d.ProtocolType;
-            d.ProtocolType = WTS_PROTOCOL_TYPE_RDP as u16;
             copy_to_wchar_array(&mut d.ClientName, &self.client.client_name.encode_utf16().collect::<Vec<_>>());
             copy_to_wchar_array(&mut d.ClientAddress, &self.client.peer_ip.encode_utf16().collect::<Vec<_>>());
             d.ClientAddressFamily = if self.client.peer_is_v6 { 23 } else { 2 };
@@ -454,7 +452,7 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
     fn SessionArbitrationEnumeration(&self, _tok: HANDLE_PTR, single: BOOL, arr: *mut u32, pcount: *mut u32) -> windows_core::Result<()> {
         guard(&format!("{}::SessionArbitrationEnumeration", self.tag()), || {
             // Default arbitration (answering with a session id here made TermService terminate in
-            // the lab). Reconnecting across RDP/FastRDP depends on ProtocolType (GetClientData).
+            // the lab).
             // SAFETY: in/out count pointer from TermService.
             let n = if pcount.is_null() { 0 } else { unsafe { *pcount } };
             logi!("{}::SessionArbitrationEnumeration single={} array={} capacity={n} -> E_NOTIMPL (default arbitration)", self.tag(), single.0, !arr.is_null());

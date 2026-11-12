@@ -352,6 +352,7 @@ pub async fn run(
                     if matches!(ev, Some(Event::Closed) | Some(Event::Rejected) | Some(Event::LogOnlyMode)) {
                         end_reason = match protocol::disconnect_reason(error_info) {
                             Some(r) if ev == Some(Event::Closed) => r.to_string(),
+                            _ if ev == Some(Event::Rejected) => format!("sign-in failed: {}", e.text),
                             _ => format!("server: {:?} {}", ev.unwrap(), e.text),
                         };
                         break;

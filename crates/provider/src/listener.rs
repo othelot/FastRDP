@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use protocol::{Event, HelloAck, Message, read_message, write_message};
+use protocol::{Event, EventMsg, HelloAck, Message, read_message, write_message};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::RemoteDesktop::*;
 use windows_core::{ComObject, Ref, implement};
@@ -203,7 +203,18 @@ fn connection_worker(cfg: ListenerConfig, mut stream: Box<dyn Transport>, info: 
         if auth.password.is_empty() { "empty" } else { "present" }
     );
 
-    // 3. hand the connection to TermService.
+    // 3. check the credentials before a session is created (like RDP's NLA), see preauth.rs
+    match crate::preauth::check(&auth.domain, &auth.user, auth.password.as_utf16()) {
+        crate::preauth::Verdict::Ok => logi!("{peer}: credentials verified"),
+        crate::preauth::Verdict::Reject(code, msg) => {
+            logw!("{peer}: sign-in rejected before creating a session (error {code}): {msg}");
+            let _ = write_message(&mut stream, &Message::Event(EventMsg { event: Event::Rejected as u32, value: code, text: msg.into() }));
+            return; // `auth` dropped here -> Secret wiped
+        }
+        crate::preauth::Verdict::Undecided(code) => logw!("{peer}: credentials could not be checked up front (error {code}) - Windows' logon decides"),
+    }
+
+    // 4. hand the connection to TermService.
     let Some(_com) = ComMta::init() else {
         loge!("{peer}: CoInitializeEx(MTA) failed");
         return;

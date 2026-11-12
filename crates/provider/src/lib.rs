@@ -19,6 +19,7 @@ pub mod connection;
 pub mod listener;
 pub mod log;
 pub mod manager;
+pub mod preauth;
 pub mod terminput;
 pub mod transport;
 pub mod util;

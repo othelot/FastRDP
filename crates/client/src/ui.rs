@@ -616,7 +616,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             }
             Update::Ended(reason) => {
                 crate::log::line(&format!("session ended: {reason}"));
-                app.status = format!("disconnected: {reason}");
+                app.status = if reason.starts_with("sign-in failed") { reason } else { format!("disconnected: {reason}") };
                 app.input = None;
                 app.screen = Screen::Form;
                 if app.fullscreen {
