@@ -1,13 +1,16 @@
 # FastRdpCommon.ps1 - shared constants/helpers for the FastRDP provider scripts (dot-source).
 $script:FastRdp = [ordered]@{
-    Clsid          = '{80999561-74B1-4880-9408-646E4A5B5187}'
+    # FastRDP's own CLSID (-NativeClsid) ...
+    NativeClsid    = '{80999561-74B1-4880-9408-646E4A5B5187}'
+    # ... or the CLSID termsrv treats as RDP (IsRDPProtocol: PROTOCOLTYPE_TSTEST, not registered by
+    # Windows): sessions are then reconnected between FastRDP and Microsoft's RDP client
+    RdpCompatibleClsid = '{E99FA5E4-A1C9-4495-8BF0-D0972D58E841}'
     InstallDir     = Join-Path $env:ProgramFiles 'FastRDP'
     DllName        = 'fastrdp_provider.dll'
     DataDir        = Join-Path $env:ProgramData 'FastRDP'
     LogDir         = Join-Path $env:ProgramData 'FastRDP\logs'
     BackupRoot     = Join-Path $env:ProgramData 'FastRDP\backup'
     WinStationsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations'
-    ClsidKey       = 'HKLM:\SOFTWARE\Classes\CLSID\{80999561-74B1-4880-9408-646E4A5B5187}'
     # Self-signed code-signing certificate created by drivers\Build-FastRdpIdd.ps1 on the build machine
     DriverCertSubject = 'CN=FastRDP Driver Publisher, O=FastRDP (self-signed)'
 }
@@ -60,3 +63,5 @@ function Restart-TermServiceSafely {
 function Test-InRdpSession {
     $env:SESSIONNAME -like 'RDP-Tcp*'
 }
+
+function Get-FastRdpClsidKey([string]$Clsid) { "HKLM:\SOFTWARE\Classes\CLSID\$Clsid" }

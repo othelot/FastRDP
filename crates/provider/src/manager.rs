@@ -64,11 +64,12 @@ impl IWRdsProtocolManager_Impl for Manager_Impl {
             let name = unsafe { from_pcwstr(wszlistenername.0) };
             let cfg = config::load(&name);
             logi!(
-                "Manager::CreateListener name='{name}' iddHwId='{}' virtualChannels={} deviceInput={} fromRegistry={}",
+                "Manager::CreateListener name='{name}' iddHwId='{}' virtualChannels={} deviceInput={} fromRegistry={} rdpCompatible={}",
                 cfg.idd_hardware_id,
                 cfg.virtual_channels,
                 cfg.device_input,
-                cfg.from_registry
+                cfg.from_registry,
+                cfg.rdp_compatible
             );
             if !cfg.from_registry {
                 logw!("Manager::CreateListener: no WinStations\\{name} key with LoadableProtocol_Object - using defaults");

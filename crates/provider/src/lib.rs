@@ -36,6 +36,16 @@ use windows_sys::Win32::System::LibraryLoader::{GET_MODULE_HANDLE_EX_FLAG_FROM_A
 
 /// {80999561-74B1-4880-9408-646E4A5B5187} - must match scripts/*.ps1
 pub const CLSID_FASTRDP_PROTOCOL_MANAGER: GUID = GUID::from_u128(0x80999561_74b1_4880_9408_646e4a5b5187);
+/// RDP-compatible registration. termsrv treats a protocol as RDP only for two hard-coded CLSIDs
+/// (`IsRDPProtocol`: rdpcorets and this one, named `PROTOCOLTYPE_TSTEST`, not registered by
+/// Windows). Only RDP connections get RDP's terminal type, and Windows reconnects a connection only
+/// to sessions of a compatible type (termsrv `CUtils::IsTerminalCompatibleToSession`, checked again
+/// by lsm when the session is applied). Registered under this CLSID, FastRDP and Microsoft's RDP
+/// client reconnect to each other's sessions like two RDP clients. Other effects of `IsRDPProtocol`
+/// (checked in termsrv 10.0.26100.9818): the license type is still LICENSE_TYPE_BUILTIN (the
+/// provider does not answer PROPERTY_TYPE_LICENSE_GUID), and the listener starts without the
+/// non-RDP-stack gate. Unofficial: chosen by the installer, `-NativeClsid` uses the own CLSID.
+pub const CLSID_FASTRDP_RDP_COMPATIBLE: GUID = GUID::from_u128(0xe99fa5e4_a1c9_4495_8bf0_d0972d58e841);
 pub const PROTOCOL_NAME: &str = "FastRDP"; // WRDS_CLIENT_DATA::ProtocolName (max 8 incl. NUL)
 
 const S_OK: HRESULT = HRESULT(0);
@@ -115,7 +125,7 @@ pub unsafe extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *cons
         one_time_init("DllGetClassObject");
         // SAFETY: checked non-null.
         let (clsid, iid) = unsafe { (*rclsid, *riid) };
-        if clsid != CLSID_FASTRDP_PROTOCOL_MANAGER {
+        if clsid != CLSID_FASTRDP_PROTOCOL_MANAGER && clsid != CLSID_FASTRDP_RDP_COMPATIBLE {
             logw!("DllGetClassObject: unknown CLSID {}", util::guid_str(&clsid));
             return CLASS_E_CLASSNOTAVAILABLE;
         }

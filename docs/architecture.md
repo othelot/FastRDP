@@ -35,6 +35,34 @@ Shared crates: `protocol` (messages + framing), `transport` (video datagrams + F
 Disconnecting the client closes the pipe; the provider reports a broken connection and the session
 becomes *Disconnected* (it keeps running and can be reconnected).
 
+## Session arbitration
+
+Which session a connection gets is decided by termsrv and lsm, and both check that the session is
+compatible with the connection's terminal type (`CUtils::IsTerminalCompatibleToSession`; lsm again
+in `CSessionReconnectController::TryApplyTerminalToSession`, failing with
+ERROR_CTX_SESSION_INCOMPATIBLE). The terminal type of a protocol-provider connection is "RDP" only
+if the listener's `LoadableProtocol_Object` is one of two CLSIDs built into termsrv
+(`IsRDPProtocol`): rdpcorets' `{5828227C-20CF-4408-B73F-73AB70B8849F}` and
+`{E99FA5E4-A1C9-4495-8BF0-D0972D58E841}` (symbol `PROTOCOLTYPE_TSTEST`, not registered by Windows).
+Every other protocol is a different type, so it never reconnects to sessions made by RDP and RDP
+never reconnects to its sessions; only the console (glass terminal) is compatible with both.
+
+* **RDP-compatible (default):** the provider is registered under `{E99FA5E4-...}`. termsrv then
+  treats FastRDP connections as RDP: Windows' own arbitration reconnects, takes over and prompts
+  exactly as for mstsc. The other places that use `IsRDPProtocol` (termsrv 10.0.26100.9818): the
+  license type stays `LICENSE_TYPE_BUILTIN` (the provider does not answer the license property),
+  and the listener starts without the non-RDP-stack gate. The installer refuses if that CLSID is
+  registered by something else.
+* **Native (`-NativeClsid`):** FastRDP's own CLSID. The provider answers
+  `SessionArbitrationEnumeration` itself with the user's active or oldest disconnected FastRDP or
+  console session (the account's SID is looked up before `OnConnected`; the answer is only given if
+  the logged-on token has that SID). termsrv calls it twice: the size query must return
+  `HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)` with the count. Sessions made by RDP are never
+  named (they would fail with ERROR_CTX_SESSION_INCOMPATIBLE).
+
+Before a session is created at all, the password is checked with a network logon (like RDP's
+NLA); definite failures are reported to the client.
+
 ## Wire protocol (`crates/protocol`)
 
 Control frames: `u32 payload_len | u16 type | u16 flags | payload`, strings as UTF-16LE with a

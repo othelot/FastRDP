@@ -22,6 +22,9 @@ pub struct ListenerConfig {
     pub from_registry: bool,
     pub device_input: bool,
     pub virtual_channels: bool,
+    /// registered under the CLSID termsrv treats as RDP (lib.rs `CLSID_FASTRDP_RDP_COMPATIBLE`):
+    /// sessions created by Microsoft's RDP client can be reconnected
+    pub rdp_compatible: bool,
 }
 
 impl ListenerConfig {
@@ -37,6 +40,7 @@ impl ListenerConfig {
             from_registry: false,
             device_input: true,
             virtual_channels: true,
+            rdp_compatible: false,
         }
     }
 }
@@ -44,8 +48,10 @@ impl ListenerConfig {
 pub fn load(listener_name: &str) -> ListenerConfig {
     let mut c = ListenerConfig::defaults(listener_name);
     let key = format!(r"{WINSTATIONS_KEY}\{listener_name}");
-    if !listener_name.is_empty() && reg_string(HKEY_LOCAL_MACHINE, &key, "LoadableProtocol_Object").is_some() {
+    if let Some(clsid) = (!listener_name.is_empty()).then(|| reg_string(HKEY_LOCAL_MACHINE, &key, "LoadableProtocol_Object")).flatten() {
         c.from_registry = true;
+        let compat = format!("{{{:?}}}", crate::CLSID_FASTRDP_RDP_COMPATIBLE);
+        c.rdp_compatible = clsid.trim().eq_ignore_ascii_case(&compat);
     }
     if let Some(v) = reg_dword(HKEY_LOCAL_MACHINE, &key, "FastRdpVirtualChannels") {
         c.virtual_channels = v != 0;

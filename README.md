@@ -13,12 +13,21 @@ built-in `RDP-Tcp` listener is never modified. Every install step has an uninsta
 > **Status: experimental.** Microsoft documents the protocol-provider API for Windows Server.
 > On Windows 11 it works but is unofficial and may change with Windows updates. Parts of the input
 > path use undocumented Windows internals (with a fallback). Use it on machines you control.
+>
+> **Sessions shared with Microsoft's Remote Desktop:** Windows only reconnects a connection to a
+> session made by a protocol it considers compatible, and it considers a protocol RDP only for two
+> built-in CLSIDs. By default FastRDP's provider is registered under the second one, an internal
+> test CLSID that Windows itself does not register, so FastRDP and mstsc reconnect to each other's
+> sessions. This is unofficial. `Install-FastRdpProvider.ps1 -NativeClsid` uses FastRDP's own
+> CLSID instead: then FastRDP and mstsc each keep their own session for the same user. Sessions
+> created in one mode cannot be reconnected in the other (sign out of them once after switching).
+> Details: [docs/architecture.md](docs/architecture.md#session-arbitration).
 
 ## Features
 
 | | |
 |---|---|
-| Sessions | Independent remote sessions created by TermService; reconnects to a disconnected session; takeover between console and remote like RDP (Windows 11 Pro allows one active user) |
+| Sessions | Independent remote sessions created by TermService; reconnects to the user's session and takes it over from the console, another FastRDP client or Microsoft's Remote Desktop client, like RDP (Windows 11 Pro allows one active user) |
 | Display | Remote Indirect Display Driver (IddCx 1.10); any resolution up to 3840×2160, DPI scale, resize the remote desktop with the client window |
 | Video | Damage-driven H.264 (x264 by default, OpenH264 optional) over QUIC datagrams with Reed-Solomon FEC, loss feedback and adaptive bitrate |
 | Input | Keyboard and mouse through the same session input devices RDP uses, so the lock screen, UAC and Ctrl+Alt+Del work (Ctrl+Alt+End sends Ctrl+Alt+Del); SendInput agent as fallback |

@@ -163,8 +163,10 @@ pub fn token_sid(token: HANDLE) -> Option<Vec<u8>> {
 /// The session to reconnect to: the user's active session (in use by another connection, which
 /// Windows then disconnects - like RDP), else the oldest disconnected one; never the session that
 /// was just created for this connection.
-pub fn pick(sessions: &[UserSession], new_session: u32) -> Option<u32> {
-    let mut c: Vec<&UserSession> = sessions.iter().filter(|s| s.id != new_session && !s.rdp).collect();
+/// `rdp_compatible`: the listener uses the CLSID termsrv treats as RDP, so sessions created by RDP
+/// are compatible too.
+pub fn pick(sessions: &[UserSession], new_session: u32, rdp_compatible: bool) -> Option<u32> {
+    let mut c: Vec<&UserSession> = sessions.iter().filter(|s| s.id != new_session && (rdp_compatible || !s.rdp)).collect();
     c.sort_by_key(|s| (!s.active, s.id));
     c.first().map(|s| s.id)
 }
@@ -176,12 +178,13 @@ mod tests {
     #[test]
     fn active_first_then_oldest_disconnected() {
         let s = |id, active| UserSession { id, active, rdp: false };
-        assert_eq!(pick(&[s(3, false), s(2, true)], 6), Some(2));
+        assert_eq!(pick(&[s(3, false), s(2, true)], 6, false), Some(2));
+        assert_eq!(pick(&[s(5, false), s(3, false)], 6, false), Some(3));
+        assert_eq!(pick(&[s(6, true)], 6, true), None, "never the new session itself");
+        assert_eq!(pick(&[], 6, true), None);
         let rdp = UserSession { id: 2, active: true, rdp: true };
-        assert_eq!(pick(&[rdp, s(3, false)], 6), Some(3), "never a session made by RDP");
-        assert_eq!(pick(&[rdp], 6), None);
-        assert_eq!(pick(&[s(5, false), s(3, false)], 6), Some(3));
-        assert_eq!(pick(&[s(6, true)], 6), None, "never the new session itself");
-        assert_eq!(pick(&[], 6), None);
+        assert_eq!(pick(&[rdp, s(3, false)], 6, false), Some(3), "own CLSID: never a session made by RDP");
+        assert_eq!(pick(&[rdp], 6, false), None);
+        assert_eq!(pick(&[rdp, s(3, false)], 6, true), Some(2), "RDP-compatible: the active RDP session");
     }
 }

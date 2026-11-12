@@ -94,7 +94,10 @@ This installs:
   - the FastRDP display driver. It is signed with FastRDP's own (self-signed) certificate,
     which is added to this computer's Trusted Root and Trusted Publisher stores;
   - the FastRDP protocol provider: a "FastRDP" listener next to Windows' RDP listener
-    (RDP-Tcp is not changed). The Remote Desktop service is restarted;
+    (RDP-Tcp is not changed). It is registered so that Windows treats it like RDP: FastRDP and
+    Microsoft's Remote Desktop client reconnect to each other's sessions. Sessions opened with
+    FastRDP 0.1.3 or older are not compatible: sign out of them once. The Remote Desktop service
+    is restarted;
   - the FastRdpServer service (LOCAL SERVICE), a per-session helper task and a firewall rule
     for UDP 33890 on Private networks;
   - automatic updates (signed releases, installed while nobody is connected remotely);

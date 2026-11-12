@@ -5,7 +5,9 @@
 .DESCRIPTION
   Changes (all reversible with Uninstall-FastRdpProvider.ps1, backups in %ProgramData%\FastRDP\backup):
     1. Copies fastrdp_provider.dll to %ProgramFiles%\FastRDP\
-    2. HKLM\SOFTWARE\Classes\CLSID\{80999561-...}\InprocServer32 = DLL, ThreadingModel=Both
+    2. HKLM\SOFTWARE\Classes\CLSID\<CLSID>\InprocServer32 = DLL, ThreadingModel=Both. CLSID: the one
+       termsrv treats as RDP ({E99FA5E4-...}, so FastRDP and Microsoft's RDP client reconnect to each
+       other's sessions), or with -NativeClsid FastRDP's own {80999561-...}. The other one is removed.
     3. %ProgramData%\FastRDP\logs with Modify for NETWORK SERVICE (TermService account)
     4. HKLM\...\Terminal Server\WinStations\<ListenerName> with LoadableProtocol_Object=<CLSID>,
        fEnableWinStation=1 and FastRdp* settings.
@@ -25,6 +27,8 @@ param(
     [string]$IddHardwareId = 'FastRDP_RemoteIDD',
     # virtual channels (clipboard, audio, ...) are on by default
     [switch]$NoVirtualChannels,
+    # register under FastRDP's own CLSID (sessions are then not shared with Microsoft's RDP client)
+    [switch]$NativeClsid,
     [switch]$RestartTermService,
     [switch]$AcknowledgeRdpDisconnect
 )
@@ -36,21 +40,31 @@ if ($RestartTermService -and (Test-InRdpSession) -and -not $AcknowledgeRdpDiscon
     throw 'You are in an RDP session; restarting TermService will disconnect you. Re-run with -AcknowledgeRdpDisconnect.'
 }
 $DllPath = (Resolve-Path $DllPath).Path
+$clsid = if ($NativeClsid) { $FastRdp.NativeClsid } else { $FastRdp.RdpCompatibleClsid }
+$otherClsid = if ($NativeClsid) { $FastRdp.RdpCompatibleClsid } else { $FastRdp.NativeClsid }
+$clsidKey = Get-FastRdpClsidKey $clsid
+# The RDP-compatible CLSID must be free (Windows does not register it): never take over a foreign one.
+if (-not $NativeClsid -and (Test-Path "$clsidKey\InprocServer32")) {
+    $existing = (Get-ItemProperty "$clsidKey\InprocServer32").'(default)'
+    if ($existing -and $existing -notlike "*\$($FastRdp.DllName)") { throw "$clsid is registered for '$existing'; use -NativeClsid." }
+}
 
 # ---- backup / state ----
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $bk = Join-Path $FastRdp.BackupRoot "install-$stamp"
 New-Item -ItemType Directory -Force $bk | Out-Null
 & reg.exe export 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' (Join-Path $bk 'WinStations.reg') /y | Out-Null
-if (Test-Path $FastRdp.ClsidKey) {
-    & reg.exe export "HKLM\SOFTWARE\Classes\CLSID\$($FastRdp.Clsid)" (Join-Path $bk 'clsid.reg') /y | Out-Null
+foreach ($c in $clsid, $otherClsid) {
+    if (Test-Path (Get-FastRdpClsidKey $c)) {
+        & reg.exe export "HKLM\SOFTWARE\Classes\CLSID\$c" (Join-Path $bk "clsid-$($c.Trim('{}')).reg") /y | Out-Null
+    }
 }
 $rdpBefore = Get-RdpTcpFingerprint
 @"
 FastRDP install $stamp
 EMERGENCY UNDO (from an elevated console, no RDP needed):
   reg delete "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\$ListenerName" /f
-  reg delete "HKLM\SOFTWARE\Classes\CLSID\$($FastRdp.Clsid)" /f
+  reg delete "HKLM\SOFTWARE\Classes\CLSID\$clsid" /f
   sc stop TermService & sc start TermService
 Full restore of the WinStations subtree: reg import "$bk\WinStations.reg"
 "@ | Set-Content (Join-Path $bk 'UNDO.txt')
@@ -78,9 +92,9 @@ if ($same) {
 $hash = (Get-FileHash $target -Algorithm SHA256).Hash
 
 # ---- 2. COM registration (HKLM, in-proc) ----
-New-Item -Force $FastRdp.ClsidKey | Out-Null
-Set-ItemProperty $FastRdp.ClsidKey -Name '(default)' -Value 'FastRDP Protocol Manager (IWRdsProtocolManager)'
-$inproc = Join-Path $FastRdp.ClsidKey 'InprocServer32'
+New-Item -Force $clsidKey | Out-Null
+Set-ItemProperty $clsidKey -Name '(default)' -Value 'FastRDP Protocol Manager (IWRdsProtocolManager)'
+$inproc = Join-Path $clsidKey 'InprocServer32'
 New-Item -Force $inproc | Out-Null
 Set-ItemProperty $inproc -Name '(default)' -Value $target
 Set-ItemProperty $inproc -Name 'ThreadingModel' -Value 'Both'
@@ -92,7 +106,12 @@ New-Item -ItemType Directory -Force $FastRdp.LogDir | Out-Null
 # ---- 4. listener key (a NEW sibling of RDP-Tcp) ----
 $lk = Join-Path $FastRdp.WinStationsKey $ListenerName
 New-Item -Force $lk | Out-Null
-New-ItemProperty $lk -Name 'LoadableProtocol_Object' -PropertyType String -Value $FastRdp.Clsid -Force | Out-Null
+New-ItemProperty $lk -Name 'LoadableProtocol_Object' -PropertyType String -Value $clsid -Force | Out-Null
+# the other registration of this DLL (switching between the two modes)
+$otherKey = Get-FastRdpClsidKey $otherClsid
+if ((Test-Path "$otherKey\InprocServer32") -and (Get-ItemProperty "$otherKey\InprocServer32").'(default)' -like "*\$($FastRdp.DllName)") {
+    Remove-Item $otherKey -Recurse -Force
+}
 New-ItemProperty $lk -Name 'fEnableWinStation' -PropertyType DWord -Value 1 -Force | Out-Null
 New-ItemProperty $lk -Name 'Comment' -PropertyType String -Value 'FastRDP custom protocol listener' -Force | Out-Null
 New-ItemProperty $lk -Name 'FastRdpIddHardwareId' -PropertyType String -Value $IddHardwareId -Force | Out-Null
@@ -102,11 +121,11 @@ $rdpAfter = Get-RdpTcpFingerprint
 if ($rdpBefore -ne $rdpAfter) { throw 'RDP-Tcp fingerprint changed - this must never happen. Investigate before continuing.' }
 
 [pscustomobject]@{
-    Stamp = $stamp; Listener = $ListenerName
+    Stamp = $stamp; Listener = $ListenerName; Clsid = $clsid
     Dll = $target; Sha256 = $hash; RdpTcpFingerprint = $rdpAfter; Backup = $bk
 } | ConvertTo-Json | Set-Content (Join-Path $FastRdp.DataDir 'install-state.json')
 
-Write-Host "Installed listener '$ListenerName' (\\.\pipe\FastRDP.Provider.$ListenerName), DLL sha256 $hash"
+Write-Host "Installed listener '$ListenerName' (CLSID $clsid$(if (-not $NativeClsid) { ', RDP-compatible' }), \\.\pipe\FastRDP.Provider.$ListenerName), DLL sha256 $hash"
 Write-Host "RDP-Tcp fingerprint unchanged: $rdpAfter"
 Write-Host "Backup + emergency undo: $bk"
 

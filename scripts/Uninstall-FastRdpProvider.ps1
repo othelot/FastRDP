@@ -21,11 +21,17 @@ $rdpBefore = Get-RdpTcpFingerprint
 $lk = Join-Path $FastRdp.WinStationsKey $ListenerName
 if (Test-Path $lk) {
     $clsid = (Get-ItemProperty $lk).LoadableProtocol_Object
-    if ($clsid -ne $FastRdp.Clsid) { throw "Listener '$ListenerName' does not point to the FastRDP CLSID ($clsid); not deleting." }
+    if ($clsid -notin @($FastRdp.NativeClsid, $FastRdp.RdpCompatibleClsid)) { throw "Listener '$ListenerName' does not point to a FastRDP CLSID ($clsid); not deleting." }
     Remove-Item $lk -Recurse -Force
     Write-Host "Removed listener key $lk"
 }
-if (Test-Path $FastRdp.ClsidKey) { Remove-Item $FastRdp.ClsidKey -Recurse -Force; Write-Host 'Removed COM registration' }
+foreach ($c in $FastRdp.NativeClsid, $FastRdp.RdpCompatibleClsid) {
+    $ck = Get-FastRdpClsidKey $c
+    # only our own registration (the DLL path ends with the FastRDP provider DLL)
+    if ((Test-Path "$ck\InprocServer32") -and (Get-ItemProperty "$ck\InprocServer32").'(default)' -like "*\$($FastRdp.DllName)") {
+        Remove-Item $ck -Recurse -Force; Write-Host "Removed COM registration $c"
+    }
+}
 
 if ($RestartTermService) {
     # Restart first so svchost unloads the (pinned) DLL, then delete it.
