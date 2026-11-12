@@ -1,6 +1,6 @@
 //! NVENC (NVIDIA hardware H.264) backend through the NVENCODE API, loaded at run time from the
 //! driver (`nvEncodeAPI64.dll`, `nvcuda.dll`): nothing is linked at build time, and a machine
-//! without an NVIDIA GPU / driver reports `Unavailable` (-> x264 fallback).
+//! without an NVIDIA GPU / driver reports `Unavailable` (-> OpenH264 fallback).
 //!
 //! * encode device: a CUDA context on CUDA device 0 (always the NVIDIA GPU, also on Optimus
 //!   laptops where the DXGI default adapter is the integrated one);
