@@ -37,6 +37,8 @@ pub struct Form {
     pub keys: crate::prefs::KeyCombos,
     /// remote desktop in physical pixels at the display's scale (Retina / HiDPI)
     pub hidpi: bool,
+    /// video bitrate target in Mbit/s; 0 = automatic (the server's setting)
+    pub bitrate_mbps: u32,
 }
 
 impl Default for Form {
@@ -52,6 +54,7 @@ impl Default for Form {
             clipboard: false,
             keys: Default::default(),
             hidpi: true,
+            bitrate_mbps: 0,
         }
     }
 }
@@ -85,6 +88,8 @@ pub enum Message {
     Clipboard(bool),
     Keys(crate::prefs::KeyCombos),
     HiDpi(bool),
+    /// bitrate slider (Mbit/s, 0 = automatic)
+    Bitrate(u32),
     WindowResized(window::Id, Size),
     Rescaled(f32),
     ApplyResize(u64),
@@ -114,6 +119,8 @@ pub enum Message {
     UpdateDone(Result<(), String>),
     /// native window handle: HWND (Windows) / NSView (macOS), for the native remote pointer
     WindowHandle(Option<isize>),
+    /// the window moved (maybe to a monitor with another refresh rate)
+    WindowMoved,
 }
 
 enum Screen {
@@ -143,6 +150,8 @@ struct App {
     fullscreen: bool,
     resize_gen: u64,
     last_display: Option<protocol::DisplayRequest>,
+    /// native window handle (refresh rate of its monitor)
+    native_window: Option<isize>,
     /// --password-env given: connect once the monitor is known
     connect_when_ready: bool,
     show_effects: bool,
@@ -193,6 +202,7 @@ impl App {
             fullscreen: false,
             resize_gen: 0,
             last_display: None,
+            native_window: None,
             connect_when_ready: false,
             show_effects: false,
             focused: true,
@@ -303,7 +313,7 @@ impl App {
             return;
         }
         let (w, h) = display::physical(display::video_area(self.window_size, self.fullscreen), self.remote_scale());
-        let req = display::request(w, h, self.remote_scale());
+        let req = display::request(w, h, self.remote_scale(), self.refresh_hz(), self.form.bitrate_mbps * 1000);
         if self.last_display == Some(req) {
             return;
         }
@@ -315,6 +325,26 @@ impl App {
                 req.width, req.height, req.scale_percent, self.window_size.width, self.window_size.height, self.fullscreen
             ));
             self.status = format!("resizing remote display to {}x{} ({}%)", req.width, req.height, req.scale_percent);
+        }
+    }
+
+    /// Refresh rate to ask the remote display for: the client monitor's.
+    fn refresh_hz(&self) -> u32 {
+        crate::refresh::request_hz(self.native_window)
+    }
+
+    /// The monitor's refresh rate changed (window moved to another monitor, or the handle arrived
+    /// after an automatic connect): ask for the same size at the new rate.
+    fn sync_refresh(&mut self) {
+        let hz = self.refresh_hz();
+        let (Some(last), Some(i)) = (self.last_display, &self.input) else { return };
+        if !matches!(self.screen, Screen::Remote) || last.refresh_hz == hz {
+            return;
+        }
+        let req = protocol::DisplayRequest { refresh_hz: hz, ..last }.clamped(display::MAX.0, display::MAX.1);
+        if i.send(InputCmd::Display(req)).is_ok() {
+            crate::log::line(&format!("display: refresh rate {} -> {} Hz", last.refresh_hz, req.refresh_hz));
+            self.last_display = Some(req);
         }
     }
 
@@ -340,10 +370,13 @@ impl App {
         };
         let choice = self.choice();
         let (w, h) = display::size_of(choice, self.display_monitor());
-        let req = display::request(w, h, self.remote_scale());
+        let req = display::request(w, h, self.remote_scale(), self.refresh_hz(), self.form.bitrate_mbps * 1000);
         self.fullscreen = choice == Choice::FullScreen;
         self.last_display = Some(req);
-        crate::log::line(&format!("display: connect at {}x{} {}% (full screen {})", req.width, req.height, req.scale_percent, self.fullscreen));
+        crate::log::line(&format!(
+            "display: connect at {}x{}@{} {}% (full screen {})",
+            req.width, req.height, req.refresh_hz, req.scale_percent, self.fullscreen
+        ));
         let saved = crate::prefs::Prefs {
             performance_flags: self.form.performance_flags,
             display: self.form.display,
@@ -351,6 +384,7 @@ impl App {
             clipboard: self.form.clipboard,
             keys: self.form.keys,
             hidpi: self.form.hidpi,
+            bitrate_mbps: self.form.bitrate_mbps,
         };
         if let Err(e) = crate::prefs::save(self.form.server.trim(), &saved) {
             eprintln!("could not save connection settings: {e}");
@@ -525,6 +559,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
                 app.form.clipboard = p.clipboard;
                 app.form.keys = p.keys;
                 app.form.hidpi = p.hidpi;
+                app.form.bitrate_mbps = p.bitrate_mbps;
             }
             app.form.server = s;
         }
@@ -534,6 +569,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
         Message::Clipboard(b) => app.form.clipboard = b,
         Message::Keys(k) => app.form.keys = k,
         Message::HiDpi(b) => app.form.hidpi = b,
+        Message::Bitrate(m) => app.form.bitrate_mbps = m,
         Message::User(s) => app.form.user = s,
         Message::Password(s) => app.form.password = s,
         Message::Connect => return app.connect(),
@@ -685,6 +721,8 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             app.sync_leds();
         }
         Message::WindowHandle(h) => {
+            app.native_window = h;
+            app.sync_refresh();
             #[cfg(windows)]
             if let Some(h) = h {
                 crate::native_cursor::install(h);
@@ -697,6 +735,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             }
             let _ = h;
         }
+        Message::WindowMoved => app.sync_refresh(),
         Message::ToggleFullscreen => return app.set_fullscreen(!app.fullscreen),
         Message::Disconnect => {
             if let Some(i) = app.input.take() {
@@ -817,6 +856,20 @@ fn hidpi_option(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// Highest bitrate offered by the slider (Mbit/s).
+const MAX_BITRATE_MBPS: u32 = protocol::DisplayRequest::MAX_BITRATE_KBPS / 1000;
+
+/// Video bitrate target: automatic (the server's setting, scaled to resolution and refresh rate) or
+/// a fixed number of Mbit/s. Lowered temporarily by the server while packets are lost.
+fn bitrate_option(app: &App) -> Element<'_, Message> {
+    let m = app.form.bitrate_mbps;
+    let label = if m == 0 { "Automatic (server setting, scaled to resolution and refresh rate)".to_string() } else { format!("{m} Mbit/s") };
+    row![text("Bitrate").width(140), column![slider(0..=MAX_BITRATE_MBPS, m, Message::Bitrate), text(label).size(13)].spacing(4),]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+}
+
 /// Session experience: presets + individual effects (applied to the remote session only).
 fn experience(app: &App) -> Element<'_, Message> {
     use protocol::perf;
@@ -900,6 +953,7 @@ fn view(app: &App) -> Element<'_, Message> {
                 },
                 checkbox(app.form.dynamic).label("Resize the remote display with the window").on_toggle(Message::Dynamic),
                 hidpi_option(app),
+                bitrate_option(app),
                 checkbox(app.form.clipboard).label("Share the clipboard (text, images, files)").on_toggle(Message::Clipboard),
                 row![
                     text("Windows key combinations").width(140),
@@ -984,7 +1038,13 @@ fn view(app: &App) -> Element<'_, Message> {
                 let top: Element<'_, Message> = if app.bar.visible || app.bar.pinned {
                     let actions =
                         connbar::Actions { pin: Message::BarPin, minimize: Message::Minimize, restore: Message::ToggleFullscreen, close: Message::Disconnect };
-                    let bar = connbar::view(&connbar::display_name(&app.form.server), app.quality, app.bar.pinned, actions);
+                    let stats = connbar::StreamStats {
+                        fps: s.fps,
+                        mbps: s.mbps,
+                        mode: app.stream.as_ref().map(|st| (st.width, st.height, st.fps)),
+                        latency_ms: s.latency_ms.map(|(p50, _)| p50),
+                    };
+                    let bar = connbar::view(&connbar::display_name(&app.form.server), &stats, app.quality, app.bar.pinned, actions);
                     let bar = mouse_area(bar).on_enter(Message::BarHover(true)).on_exit(Message::BarHover(false));
                     container(bar).width(Length::Fill).align_x(Alignment::Center).into()
                 } else {
@@ -1036,6 +1096,7 @@ pub fn run(l: Launch) -> iced::Result {
         let events = iced::event::listen_with(|e, _status, id| match e {
             iced::Event::Window(window::Event::Resized(s)) => Some(Message::WindowResized(id, s)),
             iced::Event::Window(window::Event::Rescaled(f)) => Some(Message::Rescaled(f)),
+            iced::Event::Window(window::Event::Moved(_)) => Some(Message::WindowMoved),
             iced::Event::Window(window::Event::Focused) => Some(Message::Focused),
             iced::Event::Window(window::Event::Unfocused) => Some(Message::Unfocused),
             _ => None,

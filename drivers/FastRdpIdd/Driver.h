@@ -82,7 +82,6 @@ private:
     std::shared_ptr<Direct3DDevice> m_Device;
     HANDLE m_hAvailableBufferEvent;
     ULONG m_SessionId;
-    ULONGLONG m_StartTick = 0;
     Microsoft::WRL::Wrappers::Thread m_hThread;
     Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
     Microsoft::WRL::Wrappers::Event m_hCursorEvent;

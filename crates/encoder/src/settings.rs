@@ -2,8 +2,9 @@
 //!
 //! ```toml
 //! encoder = "x264"          # x264 (default) | openh264 | nvenc, mf (not implemented yet -> x264)
-//! bitrate_kbps = 15000
-//! fps = 60
+//! bitrate_kbps = 15000     # at 1920x1080@60; scaled to the session's size and refresh rate,
+//!                           # unless the client sets its own target
+//! fps = 60                  # the streaming server uses the client's refresh rate instead
 //! keyint_secs = 0           # 0 = no periodic IDR (IDR only on request / fallback)
 //! retry_requested_secs = 30 # after a fallback, retry the configured encoder every N s (0 = never)
 //!

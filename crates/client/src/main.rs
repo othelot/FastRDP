@@ -27,6 +27,7 @@ mod maximize;
 #[cfg(windows)]
 mod native_cursor;
 mod prefs;
+mod refresh;
 mod selfupdate;
 mod session;
 mod ui;
@@ -61,6 +62,12 @@ struct Cli {
     /// Remote DPI scale in percent (headless; the GUI uses the window's scale)
     #[arg(long, default_value_t = 100)]
     scale: u32,
+    /// Remote refresh rate in Hz, 24..=240 (headless; the GUI uses the monitor's rate)
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(24..=240))]
+    refresh_hz: u32,
+    /// Video bitrate target in Mbit/s, 1..=200 (default: automatic). GUI: overrides the saved choice
+    #[arg(long, value_name = "MBPS", value_parser = clap::value_parser!(u32).range(1..=200))]
+    bitrate: Option<u32>,
     /// Session experience preset: quality (all effects), balanced, performance (no effects).
     /// Session-only: the remote user's settings are not changed. GUI: overrides the saved choice
     #[arg(long, value_parser = ["quality", "balanced", "performance"])]
@@ -168,14 +175,21 @@ fn main() {
             hello: Hello {
                 width: res.0 as u16,
                 height: res.1 as u16,
-                refresh_hz: 60,
+                refresh_hz: cli.refresh_hz as u16,
                 client_name: ui::hostname(),
                 performance_flags: cli
                     .performance_flags()
                     .or_else(|| prefs::get(&server_key).map(|p| p.performance_flags))
                     .unwrap_or(protocol::perf::BEST_QUALITY),
             },
-            display: protocol::DisplayRequest { width: res.0, height: res.1, refresh_hz: 60, scale_percent: cli.scale }.clamped(display::MAX.0, display::MAX.1),
+            display: protocol::DisplayRequest {
+                width: res.0,
+                height: res.1,
+                refresh_hz: cli.refresh_hz,
+                scale_percent: cli.scale,
+                bitrate_kbps: cli.bitrate.unwrap_or(0) * 1000,
+            }
+            .clamped(display::MAX.0, display::MAX.1),
             domain,
             user,
             password,
@@ -195,6 +209,7 @@ fn main() {
         clipboard: saved.clipboard && !cli.no_clipboard,
         keys: saved.keys,
         hidpi: saved.hidpi,
+        bitrate_mbps: cli.bitrate.unwrap_or(saved.bitrate_mbps),
         server: cli.server.unwrap_or_default(),
         pin: pin.unwrap_or_default(),
         user: cli.user.unwrap_or_default(),

@@ -27,6 +27,10 @@ pub struct VideoParams {
     pub desktop: Arc<std::sync::atomic::AtomicU64>,
     pub session: u32,
     pub fec_base: f32,
+    /// refresh rate the client asked for (Hz): encoder frame rate and bitrate follow it
+    pub refresh_hz: Arc<AtomicU32>,
+    /// bitrate target the client asked for (kbit/s, 0 = automatic)
+    pub bitrate_kbps: Arc<AtomicU32>,
 }
 
 pub fn encoder_code(k: EncoderKind) -> u8 {
@@ -99,6 +103,8 @@ impl CursorRelay {
 /// loss raise it again (x1.15) up to the target.
 pub struct RateControl {
     base_kbps: u32,
+    /// target chosen by the client, instead of the automatic one
+    fixed: Option<u32>,
     target: u32,
     current: u32,
     last_change: Instant,
@@ -108,17 +114,26 @@ pub struct RateControl {
 impl RateControl {
     pub fn new(base_kbps: u32) -> Self {
         let now = Instant::now();
-        RateControl { base_kbps, target: base_kbps, current: base_kbps, last_change: now, clean_since: now }
+        RateControl { base_kbps, fixed: None, target: base_kbps, current: base_kbps, last_change: now, clean_since: now }
     }
 
-    pub fn target_for(base_kbps: u32, w: u32, h: u32) -> u32 {
+    /// `base_kbps` is for 1920x1080 at 60 Hz. More pixels need more bits (exponent 0.8); more frames
+    /// per second need more bits too, but each frame differs less from the previous one (0.5).
+    pub fn target_for(base_kbps: u32, w: u32, h: u32, fps: u32) -> u32 {
         let ratio = (w as f64 * h as f64) / (1920.0 * 1080.0);
-        ((base_kbps as f64 * ratio.powf(0.8)).round() as u32).clamp(2_000, 120_000)
+        let rate = f64::from(fps.max(1)) / 60.0;
+        ((base_kbps as f64 * ratio.powf(0.8) * rate.powf(0.5)).round() as u32).clamp(2_000, 120_000)
     }
 
-    /// New desktop size: start at the full target for that size.
-    pub fn resize(&mut self, w: u32, h: u32) -> u32 {
-        self.target = Self::target_for(self.base_kbps, w, h);
+    /// Target chosen by the client (kbit/s, already range-checked), or 0 = automatic. Takes effect
+    /// with the next `resize`.
+    pub fn set_fixed(&mut self, kbps: u32) {
+        self.fixed = (kbps > 0).then_some(kbps);
+    }
+
+    /// New desktop size, frame rate or client target: start at the full target for it.
+    pub fn resize(&mut self, w: u32, h: u32, fps: u32) -> u32 {
+        self.target = self.fixed.unwrap_or_else(|| Self::target_for(self.base_kbps, w, h, fps));
         self.current = self.target;
         self.current
     }
@@ -184,6 +199,8 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
     let mut rate = RateControl::new(settings.bitrate_kbps);
     let mut rate_tick = Instant::now();
     let mut enc_size: Option<(u32, u32)> = None;
+    let mut enc_fps = 0u32;
+    let mut wanted_kbps = 0u32;
     let mut pk = Packetizer::with_id_source(conn.max_datagram_size().unwrap_or(1200), p.fec_base, p.frame_ids.clone());
     let mut buf = Vec::new();
     let mut last_frame = -1i64;
@@ -217,9 +234,32 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
             enc = None;
             enc_size = Some((w, h));
         }
+        // the client's refresh rate (24..=240, validated by DisplayRequest::clamped)
+        let hz = p.refresh_hz.load(Ordering::Relaxed).clamp(24, 240);
+        if hz != enc_fps {
+            if enc.is_some() {
+                info!("{tag}: refresh rate {enc_fps} -> {hz} Hz: new encoder");
+            }
+            enc = None;
+            enc_fps = hz;
+        }
+        // the client's bitrate target (0 = automatic); loss still lowers it temporarily
+        let want = p.bitrate_kbps.load(Ordering::Relaxed);
+        if want != wanted_kbps {
+            wanted_kbps = want;
+            rate.set_fixed(want);
+            if let Some(e) = enc.as_mut() {
+                let kbps = rate.resize(w, h, enc_fps);
+                info!("{tag}: bitrate target {} -> {kbps} kbps", if want == 0 { "automatic" } else { "client" });
+                if let Err(err) = e.set_bitrate(kbps) {
+                    warn!("{tag}: set_bitrate: {err}");
+                }
+            }
+        }
         if enc.as_ref().is_none() {
             let mut s = settings.clone();
-            s.bitrate_kbps = rate.resize(w, h);
+            s.fps = enc_fps;
+            s.bitrate_kbps = rate.resize(w, h, enc_fps);
             match AdaptiveEncoder::new(s, w, h) {
                 Ok(mut e) => {
                     info!("{tag}: encoder {} ({})", e.active(), e.describe());
@@ -228,7 +268,7 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
                         warn!("{tag}: FALLBACK {:?} {text}", ev.phase);
                         let _ = ctrl.send(Message::Event(EventMsg { event: Event::EncoderFallback as u32, value: 1, text }));
                     }
-                    let _ = ctrl.send(stream_info(&e, w, h, settings.fps));
+                    let _ = ctrl.send(stream_info(&e, w, h, enc_fps));
                     enc = Some(e);
                 }
                 Err(e) => {
@@ -265,7 +305,7 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
                 warn!("{tag}: FALLBACK {:?} {text}", ev.phase);
                 let _ = ctrl.send(Message::Event(EventMsg { event: Event::EncoderFallback as u32, value: e.is_fallback() as u32, text }));
             }
-            let _ = ctrl.send(stream_info(e, w, h, settings.fps));
+            let _ = ctrl.send(stream_info(e, w, h, enc_fps));
         }
         let Some(pkt) = packet else { continue };
         let loss = fb.loss_permille.load(Ordering::Relaxed) as f32 / 1000.0;
@@ -311,18 +351,29 @@ mod tests {
 
     #[test]
     fn bitrate_scales_with_resolution() {
-        assert_eq!(RateControl::target_for(15_000, 1920, 1080), 15_000);
-        let uhd = RateControl::target_for(15_000, 3840, 2160);
+        assert_eq!(RateControl::target_for(15_000, 1920, 1080, 60), 15_000);
+        let hfr = RateControl::target_for(15_000, 1920, 1080, 240);
+        assert_eq!(hfr, 30_000, "4x the frames: 2x the bits");
+        let uhd = RateControl::target_for(15_000, 3840, 2160, 60);
         assert!(uhd > 44_000 && uhd < 46_000, "{uhd}");
-        assert!(RateControl::target_for(15_000, 1280, 720) < 10_000);
-        assert_eq!(RateControl::target_for(1_000, 640, 480), 2_000, "floor");
+        assert!(RateControl::target_for(15_000, 1280, 720, 60) < 10_000);
+        assert_eq!(RateControl::target_for(1_000, 640, 480, 60), 2_000, "floor");
+    }
+
+    #[test]
+    fn client_target_replaces_the_automatic_one() {
+        let mut r = RateControl::new(15_000);
+        r.set_fixed(40_000);
+        assert_eq!(r.resize(1920, 1080, 60), 40_000);
+        r.set_fixed(0);
+        assert_eq!(r.resize(1920, 1080, 60), 15_000, "back to automatic");
     }
 
     #[test]
     fn loss_lowers_and_clean_period_restores() {
         let t0 = Instant::now() + Duration::from_secs(100);
         let mut r = RateControl::new(15_000);
-        r.resize(1920, 1080);
+        r.resize(1920, 1080, 60);
         assert_eq!(r.update(80, t0), Some(11_250));
         assert_eq!(r.update(80, t0 + Duration::from_secs(1)), None, "at most every 2 s");
         let mut t = t0;

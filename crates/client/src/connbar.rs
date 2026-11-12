@@ -1,11 +1,11 @@
-//! Full-screen connection bar, modelled on mstsc's: pin, connection quality, computer name in the
-//! middle, then minimize / restore (leave full screen) / close (disconnect). Icons are drawn with
-//! the canvas, so the bar looks the same on every platform.
+//! Full-screen connection bar, modelled on mstsc's: pin, connection quality, computer name and the
+//! live stream statistics in the middle, then minimize / restore (leave full screen) / close
+//! (disconnect). Icons are drawn with the canvas, so the bar looks the same on every platform.
 use iced::widget::canvas::{self, Frame, Path, Stroke};
 use iced::widget::{button, canvas as canvas_widget, container, row, text, tooltip};
 use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-pub const WIDTH: f32 = 660.0;
+pub const WIDTH: f32 = 820.0;
 pub const HEIGHT: f32 = 30.0;
 const SIDE: f32 = 138.0; // left and right groups have the same width: the name stays centred
 const CAPTION_W: f32 = 46.0;
@@ -14,6 +14,33 @@ const LEFT_W: f32 = 36.0;
 const BG: Color = Color::from_rgb(0.125, 0.125, 0.125);
 const FG: Color = Color::from_rgb(0.92, 0.92, 0.92);
 const DIM: Color = Color::from_rgb(0.38, 0.38, 0.38);
+/// statistics next to the name
+const MUTED: Color = Color::from_rgb(0.62, 0.62, 0.62);
+
+/// What the bar shows next to the computer name.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StreamStats {
+    pub fps: f64,
+    pub mbps: f64,
+    /// remote desktop size and refresh rate (from the stream description)
+    pub mode: Option<(u32, u32, u32)>,
+    /// capture -> decoded latency (ms), only when measurable
+    pub latency_ms: Option<f64>,
+}
+
+impl StreamStats {
+    /// e.g. `58 fps · 12.4 Mbps · 2560×1440@144 · 14 ms`
+    pub fn text(&self) -> String {
+        let mut s = format!("{:.0} fps · {:.1} Mbps", self.fps, self.mbps);
+        if let Some((w, h, hz)) = self.mode {
+            s.push_str(&format!(" · {w}×{h}@{hz}"));
+        }
+        if let Some(ms) = self.latency_ms {
+            s.push_str(&format!(" · {ms:.0} ms"));
+        }
+        s
+    }
+}
 
 /// Connection quality shown as signal bars (1..=4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,7 +175,7 @@ fn icon_button<'a, M: Clone + 'a>(g: Glyph, w: f32, on: M, close: bool) -> Eleme
 }
 
 /// The bar (fixed size, to be centred at the top of the full-screen picture).
-pub fn view<'a, M: Clone + 'a>(name: &str, quality: Quality, pinned: bool, a: Actions<M>) -> Element<'a, M> {
+pub fn view<'a, M: Clone + 'a>(name: &str, stats: &StreamStats, quality: Quality, pinned: bool, a: Actions<M>) -> Element<'a, M> {
     let tip = |content: Element<'a, M>, label: &'static str| -> Element<'a, M> {
         tooltip(content, container(text(label).size(12)).padding([3, 6]).style(container::dark), tooltip::Position::Bottom).into()
     };
@@ -163,7 +190,9 @@ pub fn view<'a, M: Clone + 'a>(name: &str, quality: Quality, pinned: bool, a: Ac
     ];
     let bar = row![
         container(left).width(SIDE),
-        container(text(name.to_string()).size(13).color(FG)).width(Length::Fill).center_x(Length::Fill),
+        container(row![text(name.to_string()).size(13).color(FG), text(stats.text()).size(11).color(MUTED)].spacing(12).align_y(Alignment::Center))
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         container(right).width(SIDE).align_x(Alignment::End),
     ]
     .align_y(Alignment::Center)
@@ -194,6 +223,14 @@ mod tests {
         assert_eq!(Quality::from_interval(0, 3), Quality(3));
         assert_eq!(Quality::from_interval(2, 0), Quality(2));
         assert_eq!(Quality::from_interval(9, 1), Quality(1));
+    }
+
+    #[test]
+    fn stats_text() {
+        let s = StreamStats { fps: 57.6, mbps: 12.44, mode: Some((2560, 1440, 144)), latency_ms: None };
+        assert_eq!(s.text(), "58 fps · 12.4 Mbps · 2560×1440@144");
+        let s = StreamStats { latency_ms: Some(13.6), mode: None, ..s };
+        assert_eq!(s.text(), "58 fps · 12.4 Mbps · 14 ms");
     }
 
     #[test]

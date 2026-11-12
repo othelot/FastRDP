@@ -14,7 +14,8 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 pub const MAGIC: u32 = 0x5044_5246; // "FRDP"
-pub const VERSION: u16 = 1;
+/// 2: `DisplayRequest::bitrate_kbps` (client-chosen target bitrate)
+pub const VERSION: u16 = 2;
 /// Large enough for a 256x256 RGBA cursor shape.
 pub const MAX_PAYLOAD: u32 = 320 * 1024;
 pub const HEADER_SIZE: usize = 8;
@@ -384,21 +385,29 @@ impl ChannelAssembler {
     }
 }
 
-/// Remote display mode wanted by the client: desktop size in pixels, refresh, DPI scale (100..500).
+/// Remote display mode wanted by the client: desktop size in pixels, refresh, DPI scale (100..500),
+/// and the video bitrate target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayRequest {
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,
     pub scale_percent: u32,
+    /// target video bitrate in kbit/s; 0 = automatic (the server's setting, scaled to the size and
+    /// refresh rate)
+    pub bitrate_kbps: u32,
 }
 
 impl DisplayRequest {
     /// Windows display scale steps.
     pub const SCALES: [u32; 12] = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500];
 
+    pub const MIN_BITRATE_KBPS: u32 = 1_000;
+    pub const MAX_BITRATE_KBPS: u32 = 200_000;
+
     /// What the remote IDD accepts: width multiple of 8 in 640..=max_w, even height in 480..=max_h,
-    /// refresh 24..=240 (else 60), scale snapped to the nearest Windows step.
+    /// refresh 24..=240 (else 60), scale snapped to the nearest Windows step; bitrate 0 (automatic)
+    /// or MIN_BITRATE_KBPS..=MAX_BITRATE_KBPS.
     pub fn clamped(self, max_w: u32, max_h: u32) -> DisplayRequest {
         let scale = *Self::SCALES.iter().min_by_key(|s| (**s as i64 - self.scale_percent as i64).abs()).unwrap();
         DisplayRequest {
@@ -406,6 +415,7 @@ impl DisplayRequest {
             height: self.height.clamp(480, max_h) & !1,
             refresh_hz: if (24..=240).contains(&self.refresh_hz) { self.refresh_hz } else { 60 },
             scale_percent: scale,
+            bitrate_kbps: if self.bitrate_kbps == 0 { 0 } else { self.bitrate_kbps.clamp(Self::MIN_BITRATE_KBPS, Self::MAX_BITRATE_KBPS) },
         }
     }
 }
@@ -768,6 +778,7 @@ impl Message {
                 w.u32(d.height);
                 w.u32(d.refresh_hz);
                 w.u32(d.scale_percent);
+                w.u32(d.bitrate_kbps);
             }
             Message::CursorPos(c) => {
                 w.0.push(c.visible as u8);
@@ -861,7 +872,9 @@ impl Message {
                 Message::ChannelData(ChannelData { id, last, data: r.take(len)?.to_vec() })
             }
             msg::CHANNEL_CLOSE => Message::ChannelClose(r.u32()?),
-            msg::C2S_DISPLAY => Message::Display(DisplayRequest { width: r.u32()?, height: r.u32()?, refresh_hz: r.u32()?, scale_percent: r.u32()? }),
+            msg::C2S_DISPLAY => {
+                Message::Display(DisplayRequest { width: r.u32()?, height: r.u32()?, refresh_hz: r.u32()?, scale_percent: r.u32()?, bitrate_kbps: r.u32()? })
+            }
             msg::S2C_CURSOR_POS => Message::CursorPos(CursorPos { visible: r.take(1)?[0] != 0, x: r.u32()? as i32, y: r.u32()? as i32, shape_id: r.u32()? }),
             msg::C2S_FEEDBACK => Message::Feedback(Feedback {
                 frames_complete: r.u32()?,
@@ -1005,7 +1018,7 @@ mod tests {
         roundtrip(Message::CursorShape(CursorShape { id: 3, width: 2, height: 1, hot_x: 1, hot_y: 0, rgba: vec![1, 2, 3, 4, 5, 6, 7, 8] }));
         roundtrip(Message::CursorPos(CursorPos { visible: true, x: -4, y: 1079, shape_id: 3 }));
         assert!(disconnect_reason(5).unwrap().contains("taken over"));
-        roundtrip(Message::Display(DisplayRequest { width: 2560, height: 1440, refresh_hz: 60, scale_percent: 150 }));
+        roundtrip(Message::Display(DisplayRequest { width: 2560, height: 1440, refresh_hz: 60, scale_percent: 150, bitrate_kbps: 25_000 }));
         roundtrip(Message::ChannelOpen(ChannelOpen { id: 3, name: "CLIPRDR".into(), is_static: true }));
         roundtrip(Message::ChannelClose(3));
         let big: Vec<u8> = (0..(ChannelData::MAX_FRAGMENT * 2 + 17)).map(|i| i as u8).collect();
@@ -1019,9 +1032,11 @@ mod tests {
         }
         assert_eq!(out, Some((5, big)));
         assert_eq!(asm.push(ChannelData { id: 9, last: true, data: vec![] }), Some((9, vec![])));
-        let c = DisplayRequest { width: 1923, height: 1081, refresh_hz: 1000, scale_percent: 160 }.clamped(3840, 2160);
+        let c = DisplayRequest { width: 1923, height: 1081, refresh_hz: 1000, scale_percent: 160, bitrate_kbps: 0 }.clamped(3840, 2160);
+        assert_eq!(c.bitrate_kbps, 0, "automatic stays automatic");
         assert_eq!((c.width, c.height, c.refresh_hz, c.scale_percent), (1920, 1080, 60, 150));
-        let c = DisplayRequest { width: 100, height: 9000, refresh_hz: 144, scale_percent: 90 }.clamped(3840, 2160);
+        let c = DisplayRequest { width: 100, height: 9000, refresh_hz: 144, scale_percent: 90, bitrate_kbps: 50 }.clamped(3840, 2160);
+        assert_eq!(c.bitrate_kbps, DisplayRequest::MIN_BITRATE_KBPS);
         assert_eq!((c.width, c.height, c.refresh_hz, c.scale_percent), (640, 2160, 144, 100));
         assert!(disconnect_reason(0).is_none());
         let big = vec![0u8; 256 * 256 * 4];

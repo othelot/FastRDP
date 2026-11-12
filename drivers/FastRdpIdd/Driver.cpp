@@ -31,15 +31,12 @@ using namespace FastRdp;
 // Standard modes always offered. The client's resolution (any size, see ProcessControl) is put in
 // front at run time; without a client request the session starts at the first entry.
 static const ModeEntry s_Modes[] = {
-    { 1920, 1080,  60 },
-    { 1920, 1080, 120 },
-    { 1920, 1080, 144 },
-    { 2560, 1440,  60 },
-    { 2560, 1440, 120 },
-    { 3840, 2160,  60 },
-    { 1600,  900,  60 },
-    { 1280,  720,  60 },
     { 1024,  768,  60 },
+    { 1280,  720,  60 },
+    { 1600,  900,  60 },
+    { 1920, 1080,  60 },
+    { 2560, 1440,  60 },
+    { 3840, 2160,  60 },
 };
 static constexpr UINT kPhysicalWidthMm = 527;   // ~24" 16:9, used for DPI calculation
 static constexpr UINT kPhysicalHeightMm = 296;
@@ -167,65 +164,6 @@ static ULONG ParseSessionId(const std::wstring& instanceId)
     size_t p = up.find(L"SESSIONID_");
     if (p == std::wstring::npos) return 0xFFFFFFFF;
     return wcstoul(up.c_str() + p + 10, nullptr, 10);
-}
-
-// Evidence helper: copies a swap-chain surface to a CPU staging texture and writes a 32-bit BMP to
-// %ProgramData%\FastRDP\logs\frame-s<session>-<n>.bmp. Debug/evidence only (CPU copy, not the fast path).
-static HRESULT DumpFrameToBmp(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGIResource* surface, ULONG sessionId, UINT index)
-{
-    ComPtr<ID3D11Texture2D> src;
-    HRESULT hr = surface->QueryInterface(IID_PPV_ARGS(&src));
-    if (FAILED(hr)) return hr;
-    D3D11_TEXTURE2D_DESC d{};
-    src->GetDesc(&d);
-    if (d.Format != DXGI_FORMAT_B8G8R8A8_UNORM && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) return E_NOTIMPL;
-    D3D11_TEXTURE2D_DESC sd = d;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags = 0;
-    sd.MipLevels = 1;
-    sd.ArraySize = 1;
-    ComPtr<ID3D11Texture2D> staging;
-    hr = dev->CreateTexture2D(&sd, nullptr, &staging);
-    if (FAILED(hr)) return hr;
-    ctx->CopyResource(staging.Get(), src.Get());
-    D3D11_MAPPED_SUBRESOURCE m{};
-    hr = ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m);
-    if (FAILED(hr)) return hr;
-
-    wchar_t path[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"ProgramData", path, MAX_PATH);
-    if (n == 0 || n > MAX_PATH - 64) { ctx->Unmap(staging.Get(), 0); return E_FAIL; }
-    wchar_t name[64];
-    _snwprintf_s(name, _TRUNCATE, L"\\FastRDP\\logs\\frame-s%lu-%u.bmp", sessionId, index);
-    wcscat_s(path, name);
-
-    BITMAPFILEHEADER bf{};
-    BITMAPINFOHEADER bi{};
-    bi.biSize = sizeof(bi);
-    bi.biWidth = static_cast<LONG>(d.Width);
-    bi.biHeight = -static_cast<LONG>(d.Height); // top-down
-    bi.biPlanes = 1;
-    bi.biBitCount = 32;
-    bi.biCompression = BI_RGB;
-    DWORD rowBytes = d.Width * 4;
-    bi.biSizeImage = rowBytes * d.Height;
-    bf.bfType = 0x4D42;
-    bf.bfOffBits = sizeof(bf) + sizeof(bi);
-    bf.bfSize = bf.bfOffBits + bi.biSizeImage;
-
-    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) { ctx->Unmap(staging.Get(), 0); return HRESULT_FROM_WIN32(GetLastError()); }
-    DWORD w = 0;
-    WriteFile(h, &bf, sizeof(bf), &w, nullptr);
-    WriteFile(h, &bi, sizeof(bi), &w, nullptr);
-    const BYTE* row = static_cast<const BYTE*>(m.pData);
-    for (UINT y = 0; y < d.Height; y++, row += m.RowPitch) WriteFile(h, row, rowBytes, &w, nullptr);
-    CloseHandle(h);
-    ctx->Unmap(staging.Get(), 0);
-    Log(L"frame dump -> %s", path);
-    return S_OK;
 }
 
 #pragma endregion
@@ -378,7 +316,6 @@ HRESULT Direct3DDevice::Init()
 SwapChainProcessor::SwapChainProcessor(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, ULONG SessionId)
     : m_Monitor(Monitor), m_hSwapChain(hSwapChain), m_Device(std::move(Device)), m_hAvailableBufferEvent(NewFrameEvent), m_SessionId(SessionId)
 {
-    m_StartTick = GetTickCount64();
     m_hTerminateEvent.Attach(CreateEvent(nullptr, TRUE, FALSE, nullptr)); // manual-reset: also polled after RunCore
     m_hCursorEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
     m_hCursorStop.Attach(CreateEvent(nullptr, TRUE, FALSE, nullptr));
@@ -496,8 +433,6 @@ bool SwapChainProcessor::RunCore()
     ULONGLONG windowStart = GetTickCount64();
     bool firstLogged = false;
 
-    UINT dumps = 0;
-    ULONGLONG lastDump = 0;
     bool publisherReady = FramePublisher::Instance().Ensure(m_SessionId);
     if (publisherReady) SetupCursor();
     UINT publishErrors = 0;
@@ -543,16 +478,6 @@ bool SwapChainProcessor::RunCore()
                 m_SessionId, d.Width, d.Height, static_cast<int>(d.Format), static_cast<unsigned long long>(Buffer.MetaData.PresentationFrameNumber),
                 Buffer.MetaData.DirtyRectCount);
             firstLogged = true;
-        }
-
-        // Evidence: dump frame #1 (after 3 s), then one frame every 20 s, max 5 files per swap-chain.
-        ULONGLONG t = GetTickCount64();
-        if (dumps < 5 && (dumps == 0 ? (frames > 1 && t >= m_StartTick + 3000)
-                                     : (t - lastDump >= 20000))) {
-            HRESULT dh = DumpFrameToBmp(m_Device->Device.Get(), m_Device->DeviceContext.Get(), AcquiredBuffer.Get(), m_SessionId, dumps);
-            if (FAILED(dh)) Log(L"frame dump failed 0x%08X", dh);
-            ++dumps;
-            lastDump = t;
         }
 
         // CPU path: publish into the per-session shared memory for fastrdp-server (x264/OpenH264).

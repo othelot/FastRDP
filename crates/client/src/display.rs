@@ -87,9 +87,10 @@ pub fn window_for(w: u32, h: u32, scale: f32) -> Size {
     Size::new(w as f32 / scale, h as f32 / scale + BAR_HEIGHT)
 }
 
-/// Display request for a picture area of `w`×`h` physical pixels at `scale`.
-pub fn request(w: u32, h: u32, scale: f32) -> DisplayRequest {
-    DisplayRequest { width: w, height: h, refresh_hz: 60, scale_percent: (scale * 100.0).round() as u32 }.clamped(MAX.0, MAX.1)
+/// Display request for a picture area of `w`×`h` physical pixels at `scale` and `hz`, with a
+/// bitrate target in kbit/s (0 = automatic).
+pub fn request(w: u32, h: u32, scale: f32, hz: u32, bitrate_kbps: u32) -> DisplayRequest {
+    DisplayRequest { width: w, height: h, refresh_hz: hz, scale_percent: (scale * 100.0).round() as u32, bitrate_kbps }.clamped(MAX.0, MAX.1)
 }
 
 #[cfg(test)]
@@ -115,8 +116,9 @@ mod tests {
         let w = window_for(1920, 1080, 1.5);
         assert_eq!(physical(video_area(w, false), 1.5), (1920, 1080));
         assert_eq!(physical(video_area(Size::new(1280.0, 720.0), true), 2.0), (2560, 1440));
-        let r = request(1923, 1081, 1.25);
-        assert_eq!((r.width, r.height, r.scale_percent), (1920, 1080, 125));
-        assert_eq!(request(5120, 2880, 2.0).width, 3840);
+        let r = request(1923, 1081, 1.25, 144, 0);
+        assert_eq!((r.width, r.height, r.refresh_hz, r.scale_percent), (1920, 1080, 144, 125));
+        assert_eq!(request(5120, 2880, 2.0, 60, 0).width, 3840);
+        assert_eq!(request(1920, 1080, 1.0, 60, 40_000).bitrate_kbps, 40_000);
     }
 }

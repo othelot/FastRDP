@@ -49,11 +49,21 @@ pub struct Prefs {
     /// remote desktop in physical pixels at the display's scale (Retina / HiDPI); off = in
     /// logical points at 100%, enlarged locally
     pub hidpi: bool,
+    /// video bitrate target in Mbit/s; 0 = automatic (the server's setting)
+    pub bitrate_mbps: u32,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { performance_flags: protocol::perf::BEST_QUALITY, display: None, dynamic: true, clipboard: true, keys: KeyCombos::Remote, hidpi: true }
+        Prefs {
+            performance_flags: protocol::perf::BEST_QUALITY,
+            display: None,
+            dynamic: true,
+            clipboard: true,
+            keys: KeyCombos::Remote,
+            hidpi: true,
+            bitrate_mbps: 0,
+        }
     }
 }
 
@@ -78,6 +88,7 @@ fn parse(line: &str) -> Option<(String, Prefs)> {
             Some(("clipboard", v)) => p.clipboard = v == "1",
             Some(("keys", v)) => p.keys = KeyCombos::from_key(v),
             Some(("hidpi", v)) => p.hidpi = v == "1",
+            Some(("bitrate", v)) => p.bitrate_mbps = v.parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -87,12 +98,13 @@ fn parse(line: &str) -> Option<(String, Prefs)> {
 fn format(server: &str, p: &Prefs) -> String {
     let res = p.display.map(|i| i.to_string()).unwrap_or_else(|| "full".into());
     format!(
-        "{server} perf=0x{:X} res={res} dynamic={} clipboard={} keys={} hidpi={}\n",
+        "{server} perf=0x{:X} res={res} dynamic={} clipboard={} keys={} hidpi={} bitrate={}\n",
         p.performance_flags,
         p.dynamic as u8,
         p.clipboard as u8,
         p.keys.key(),
-        p.hidpi as u8
+        p.hidpi as u8,
+        p.bitrate_mbps
     )
 }
 
@@ -134,6 +146,7 @@ mod tests {
             clipboard: false,
             keys: KeyCombos::FullScreen,
             hidpi: false,
+            bitrate_mbps: 40,
         };
         let line = format("pc:33890", &p);
         assert_eq!(parse(line.trim()), Some(("pc:33890".to_string(), p)));

@@ -121,9 +121,17 @@ async fn handle(cfg: Arc<Config>, inc: quinn::Incoming, agents: Agents) -> Resul
     let (session_tx, mut session_rx) = watch::channel::<Option<u32>>(None);
     let (devices_tx, devices_rx) = watch::channel::<Option<u32>>(None);
     // remote display mode wanted by the client (initial: HELLO size; later: Display messages)
-    let initial_display =
-        protocol::DisplayRequest { width: hello.width as u32, height: hello.height as u32, refresh_hz: hello.refresh_hz as u32, scale_percent: 100 };
+    let initial_display = protocol::DisplayRequest {
+        width: hello.width as u32,
+        height: hello.height as u32,
+        refresh_hz: hello.refresh_hz as u32,
+        scale_percent: 100,
+        bitrate_kbps: 0,
+    };
     let (display_tx, mut display_rx) = watch::channel(initial_display);
+    // refresh rate for the video thread (follows the client's display requests)
+    let refresh_hz = Arc::new(std::sync::atomic::AtomicU32::new(initial_display.clamped(frame_shm::MAX_WIDTH, frame_shm::MAX_HEIGHT).refresh_hz));
+    let bitrate_kbps = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let mut display_ctl: Option<(u32, frame_shm::DisplayControl, Option<protocol::DisplayRequest>, u32)> = None;
     let desktop = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -272,12 +280,15 @@ async fn handle(cfg: Arc<Config>, inc: quinn::Incoming, agents: Agents) -> Resul
                 if let Some((s, _)) = video.take() { s.store(true, Ordering::SeqCst); }
                 let s = Arc::new(AtomicBool::new(false));
                 let (c, ctrl, fbv, sv) = (conn.clone(), ctrl_tx.clone(), fb.clone(), s.clone());
-                let params = VideoParams { frame_ids: frame_ids.clone(), desktop: desktop.clone(), session: sid, fec_base: cfg.fec_base };
+                let params = VideoParams { frame_ids: frame_ids.clone(), desktop: desktop.clone(), session: sid, fec_base: cfg.fec_base, refresh_hz: refresh_hz.clone(), bitrate_kbps: bitrate_kbps.clone() };
                 info!("[{remote}] session {sid}: starting video");
                 video = Some((s, tokio::task::spawn_blocking(move || video::run(c, params, ctrl, fbv, sv))));
             }
             r = display_rx.changed() => {
                 if r.is_err() { continue; }
+                let want = display_rx.borrow().clamped(frame_shm::MAX_WIDTH, frame_shm::MAX_HEIGHT);
+                refresh_hz.store(want.refresh_hz, Ordering::Relaxed);
+                bitrate_kbps.store(want.bitrate_kbps, Ordering::Relaxed);
                 if let Some(sid) = *session_rx.borrow() {
                     apply_display(&remote, sid, *display_rx.borrow(), &mut display_ctl);
                 }
