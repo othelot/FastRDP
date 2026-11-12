@@ -316,9 +316,6 @@ pub async fn run(
     let mut dec = openh264::decoder::Decoder::new()?;
     let mut rec = cfg.record.as_ref().map(std::fs::File::create).transpose()?;
     let mut waiting_key = true;
-    // the first decode error of each stream goes to the log (a stream the decoder rejects entirely
-    // would otherwise only show as a black picture)
-    let mut decode_error_logged = false;
     let mut last_frame_id: Option<u32> = None;
     let mut last_idr_req = Instant::now() - Duration::from_secs(1);
     let mut mouse_seq = 0u32;
@@ -365,7 +362,6 @@ pub async fn run(
                     // new encoder instance (start, session switch, fallback): references are invalid
                     dec = openh264::decoder::Decoder::new()?;
                     waiting_key = true;
-                    decode_error_logged = false;
                     emit(Update::Stream(s));
                 }
                 Some(_) => {}
@@ -468,13 +464,7 @@ pub async fn run(
                             if frames.put(Arc::new(vf)) { emit(Update::FrameReady); }
                         }
                         Ok(None) => {}
-                        Err(e) => {
-                            if !decode_error_logged {
-                                decode_error_logged = true;
-                                crate::log::line(&format!("decode error (frame {}, {} bytes): {e}", f.frame_id, f.data.len()));
-                            }
-                            waiting_key = true;
-                        }
+                        Err(_) => waiting_key = true,
                     }
                 }
             },

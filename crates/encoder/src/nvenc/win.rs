@@ -308,10 +308,8 @@ impl Nvenc {
         h.idr_period = gop;
         h.flags |= sys::H264_REPEAT_SPSPPS;
         h.entropy_coding_mode = sys::H264_ENTROPY_CABAC;
-        // Level 5.2 at most: automatic selection writes 6.x into the SPS for e.g. 3456x2160@120
-        // (macroblock rate above 5.2's), and OpenH264 - the client's decoder - rejects every 6.x
-        // stream (black picture). The decoder only needs the level for its buffer sizes.
-        h.level = sys::H264_LEVEL_52;
+        // level: automatic (NVENC rejects a fixed 5.2 for e.g. 3456x2160@120, "Invalid Level");
+        // the SPS it writes is capped to 5.2 afterwards, see `super::cap_sps_level`
         // initialization
         let init = &mut *me.init;
         init.version = sys::INITIALIZE_PARAMS_VER;
@@ -503,13 +501,16 @@ impl Backend for Nvenc {
             return Err(EncodeError::Runtime(self.error("lock bitstream", rc)));
         }
         let len = lock.bitstream_size_in_bytes as usize;
-        let data = if len == 0 || lock.bitstream_buffer_ptr.is_null() {
+        let mut data = if len == 0 || lock.bitstream_buffer_ptr.is_null() {
             Vec::new()
         } else {
             // SAFETY: the locked bitstream holds `len` bytes until it is unlocked; copied now.
             unsafe { std::slice::from_raw_parts(lock.bitstream_buffer_ptr.cast::<u8>(), len) }.to_vec()
         };
         let keyframe = matches!(lock.picture_type, sys::PIC_TYPE_IDR | sys::PIC_TYPE_I);
+        if keyframe {
+            super::cap_sps_level(&mut data); // SPS/PPS come with every IDR
+        }
         let rc = call!(self.api, unlock_bitstream(self.enc, self.output));
         if rc != sys::SUCCESS {
             return Err(EncodeError::Runtime(self.error("unlock bitstream", rc)));

@@ -46,8 +46,6 @@ pub const PIC_FLAG_OUTPUT_SPSPPS: u32 = 0x4;
 /// NV_ENC_CONFIG_H264 bit field: repeat SPS/PPS with every IDR (a client can join at any IDR)
 pub const H264_REPEAT_SPSPPS: u32 = 1 << 12;
 pub const H264_ENTROPY_CABAC: u32 = 1;
-/// NV_ENC_LEVEL_H264_52: the highest level OpenH264 (the client's decoder) accepts
-pub const H264_LEVEL_52: u32 = 52;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
