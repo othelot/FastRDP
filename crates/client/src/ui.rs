@@ -18,7 +18,7 @@ use crate::known;
 use crate::session::{self, FrameSlot, InputCmd, SessionConfig, Stats, UntrustedCert, Update, VideoFrame};
 use crate::video::VideoView;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Form {
     pub server: String,
     /// explicit pin from the command line (overrides the known-servers file); not shown in the form
@@ -35,6 +35,25 @@ pub struct Form {
     pub clipboard: bool,
     /// where Windows key combinations (Alt+Tab, Win, ...) go
     pub keys: crate::prefs::KeyCombos,
+    /// remote desktop in physical pixels at the display's scale (Retina / HiDPI)
+    pub hidpi: bool,
+}
+
+impl Default for Form {
+    fn default() -> Self {
+        Form {
+            server: String::new(),
+            pin: String::new(),
+            user: String::new(),
+            password: String::new(),
+            display: None,
+            dynamic: false,
+            performance_flags: 0,
+            clipboard: false,
+            keys: Default::default(),
+            hidpi: true,
+        }
+    }
 }
 
 pub struct Launch {
@@ -65,14 +84,22 @@ pub enum Message {
     ShowEffects(bool),
     Clipboard(bool),
     Keys(crate::prefs::KeyCombos),
+    HiDpi(bool),
     WindowResized(window::Id, Size),
     Rescaled(f32),
     ApplyResize(u64),
     ToggleFullscreen,
     /// window maximize while the remote screen is in a window -> full screen (Windows: SC_MAXIMIZE)
+    #[cfg_attr(not(windows), allow(dead_code))]
     MaximizeRequested,
     /// answer of window::is_maximized after a resize (other platforms / snap)
     MaximizedCheck(bool),
+    /// macOS: window mode after a resize (the green button enters full screen on its own)
+    #[cfg(target_os = "macos")]
+    ModeCheck(window::Mode),
+    /// macOS: look at the local Caps Lock state (no key event for it reaches the window)
+    #[cfg(target_os = "macos")]
+    LedPoll,
     Minimize,
     /// connection bar: pin toggle, mouse over it, mouse at the top edge, delayed hide
     BarPin,
@@ -85,8 +112,8 @@ pub enum Message {
     UpdateFound(Option<update::Release>),
     UpdateClient,
     UpdateDone(Result<(), String>),
-    /// native window handle (Windows: native remote pointer)
-    Hwnd(Option<isize>),
+    /// native window handle: HWND (Windows) / NSView (macOS), for the native remote pointer
+    WindowHandle(Option<isize>),
 }
 
 enum Screen {
@@ -121,6 +148,10 @@ struct App {
     show_effects: bool,
     /// our window has the keyboard focus (WM_SETFOCUS / WM_KILLFOCUS)
     focused: bool,
+    /// lock-key state last sent to the session
+    leds_sent: Option<u8>,
+    /// diagnostics: first decoded frame of the current stream written to the log
+    first_frame_logged: bool,
     /// full-screen connection bar
     bar: Bar,
     quality: Quality,
@@ -165,6 +196,8 @@ impl App {
             connect_when_ready: false,
             show_effects: false,
             focused: true,
+            leds_sent: None,
+            first_frame_logged: false,
             bar: Bar { pinned: true, visible: true, hover: false, generation: 0 },
             quality: Quality(4),
             prev_loss: (0, 0),
@@ -196,9 +229,10 @@ impl App {
     }
 
     /// Lock keys (Caps/Num/Scroll) of the remote session := local state (connect, focus).
-    fn sync_leds(&self) {
+    fn sync_leds(&mut self) {
         if let (Some(i), Some(leds)) = (&self.input, local_leds()) {
             let _ = i.send(InputCmd::Event(protocol::InputEvent::Sync { leds }));
+            self.leds_sent = Some(leds);
         }
     }
 
@@ -220,8 +254,34 @@ impl App {
         crate::native_cursor::update(self.cursor_shape.as_deref(), visible, picture, ratio);
     }
 
+    /// macOS: hands the remote pointer (shape, visibility, picture rectangle) to the OS cursor.
+    #[cfg(target_os = "macos")]
+    fn sync_native_cursor(&self) {
+        let remote = matches!(self.screen, Screen::Remote) && self.input.is_some();
+        let (picture, points) = match (&self.frame, remote) {
+            (Some(f), true) => {
+                let area = display::video_area(self.window_size, self.fullscreen);
+                let r = crate::video::fit(iced::Rectangle { x: 0.0, y: 0.0, width: area.width, height: area.height }, f.width, f.height);
+                (Some((r.x, r.y, r.width, r.height)), r.width / f.width as f32)
+            }
+            _ => (None, 1.0),
+        };
+        let visible = self.cursor_pos.map(|p| p.visible).unwrap_or(false);
+        crate::mac_cursor::update(self.cursor_shape.as_deref(), visible, picture, points);
+    }
+
+    /// Scale of the remote desktop: the display's (HiDPI) or 100% (picture enlarged locally).
+    fn remote_scale(&self) -> f32 {
+        if self.form.hidpi { self.scale } else { 1.0 }
+    }
+
+    /// The monitor as the remote desktop sees it (in remote pixels).
+    fn display_monitor(&self) -> Option<Monitor> {
+        self.monitor.map(|m| Monitor { scale: self.remote_scale(), ..m })
+    }
+
     fn choice(&self) -> Choice {
-        let c = display::choices(self.monitor);
+        let c = display::choices(self.display_monitor());
         match self.form.display {
             Some(i) => c.get(i as usize).copied().unwrap_or(Choice::FullScreen),
             None => Choice::FullScreen,
@@ -242,14 +302,18 @@ impl App {
         if !self.form.dynamic || !matches!(self.screen, Screen::Remote) {
             return;
         }
-        let (w, h) = display::physical(display::video_area(self.window_size, self.fullscreen), self.scale);
-        let req = display::request(w, h, self.scale);
+        let (w, h) = display::physical(display::video_area(self.window_size, self.fullscreen), self.remote_scale());
+        let req = display::request(w, h, self.remote_scale());
         if self.last_display == Some(req) {
             return;
         }
         if let Some(i) = &self.input {
             let _ = i.send(InputCmd::Display(req));
             self.last_display = Some(req);
+            crate::log::line(&format!(
+                "display: resize to {}x{} {}% (window {}x{} points, full screen {})",
+                req.width, req.height, req.scale_percent, self.window_size.width, self.window_size.height, self.fullscreen
+            ));
             self.status = format!("resizing remote display to {}x{} ({}%)", req.width, req.height, req.scale_percent);
         }
     }
@@ -275,16 +339,18 @@ impl App {
             }
         };
         let choice = self.choice();
-        let (w, h) = display::size_of(choice, self.monitor);
-        let req = display::request(w, h, self.scale);
+        let (w, h) = display::size_of(choice, self.display_monitor());
+        let req = display::request(w, h, self.remote_scale());
         self.fullscreen = choice == Choice::FullScreen;
         self.last_display = Some(req);
+        crate::log::line(&format!("display: connect at {}x{} {}% (full screen {})", req.width, req.height, req.scale_percent, self.fullscreen));
         let saved = crate::prefs::Prefs {
             performance_flags: self.form.performance_flags,
             display: self.form.display,
             dynamic: self.form.dynamic,
             clipboard: self.form.clipboard,
             keys: self.form.keys,
+            hidpi: self.form.hidpi,
         };
         if let Err(e) = crate::prefs::save(self.form.server.trim(), &saved) {
             eprintln!("could not save connection settings: {e}");
@@ -345,15 +411,15 @@ impl App {
             Some(id) if self.fullscreen => window::set_mode(id, window::Mode::Fullscreen),
             Some(id) => window::set_mode::<Message>(id, window::Mode::Windowed)
                 .chain(window::maximize(id, false))
-                .chain(window::resize(id, display::window_for(req.width, req.height, self.scale))),
+                .chain(window::resize(id, display::window_for(req.width, req.height, self.remote_scale()))),
             None => Task::none(),
         };
         Task::batch([Task::run(rx, Message::Session), sizing])
     }
 }
 
-/// Local lock-key state (`protocol::leds`). Windows only; elsewhere the toggles are not readable
-/// through iced/winit, so no sync is sent.
+/// Local lock-key state (`protocol::leds`). Windows and macOS; elsewhere the toggles are not
+/// readable through iced/winit, so no sync is sent.
 fn local_leds() -> Option<u8> {
     #[cfg(windows)]
     {
@@ -371,14 +437,37 @@ fn local_leds() -> Option<u8> {
         }
         Some(l)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Some(crate::mac_keytap::local_leds())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
 }
 
 pub fn hostname() -> String {
-    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "fastrdp-client".into())
+    std::env::var("COMPUTERNAME").ok().or_else(os_hostname).unwrap_or_else(|| "fastrdp-client".into())
+}
+
+/// gethostname(3) without the domain part ("MacBook-Pro.local" -> "MacBook-Pro"); HOSTNAME is
+/// usually not exported (and never for apps started from Finder).
+#[cfg(unix)]
+fn os_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is writable for buf.len() bytes; gethostname writes a NUL-terminated name within it
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let name = std::ffi::CStr::from_bytes_until_nul(&buf).ok()?.to_string_lossy();
+    let short = name.split('.').next().unwrap_or_default();
+    (!short.is_empty()).then(|| short.to_owned())
+}
+
+#[cfg(not(unix))]
+fn os_hostname() -> Option<String> {
+    std::env::var("HOSTNAME").ok()
 }
 
 fn wipe_string(s: &mut String) {
@@ -392,7 +481,11 @@ fn native_pointer_available() -> bool {
     {
         crate::native_cursor::available()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac_cursor::available()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         false
     }
@@ -410,6 +503,14 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
         crate::keyhook::configure(app.input.clone(), capture);
         crate::maximize::set_active(remote && !app.fullscreen);
     }
+    #[cfg(target_os = "macos")]
+    {
+        app.sync_native_cursor();
+        use crate::prefs::KeyCombos;
+        let remote = matches!(app.screen, Screen::Remote) && app.input.is_some();
+        let capture = remote && (app.form.keys == KeyCombos::Remote || (app.form.keys == KeyCombos::FullScreen && app.fullscreen));
+        crate::mac_keytap::configure(app.input.clone(), capture, app.focused);
+    }
     task
 }
 
@@ -423,6 +524,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
                 app.form.dynamic = p.dynamic;
                 app.form.clipboard = p.clipboard;
                 app.form.keys = p.keys;
+                app.form.hidpi = p.hidpi;
             }
             app.form.server = s;
         }
@@ -431,6 +533,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
         Message::ShowEffects(b) => app.show_effects = b,
         Message::Clipboard(b) => app.form.clipboard = b,
         Message::Keys(k) => app.form.keys = k,
+        Message::HiDpi(b) => app.form.hidpi = b,
         Message::User(s) => app.form.user = s,
         Message::Password(s) => app.form.password = s,
         Message::Connect => return app.connect(),
@@ -440,14 +543,19 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             app.monitor = size.map(|logical| Monitor { logical, scale: app.scale });
             if let Some(id) = id {
                 let hwnd = window::run(id, |w| {
-                    use raw_window_handle::RawWindowHandle;
-                    match w.window_handle().map(|h| h.as_raw()) {
-                        #[cfg(windows)]
-                        Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
-                        _ => None,
+                    #[cfg(windows)]
+                    if let Ok(raw_window_handle::RawWindowHandle::Win32(h)) = w.window_handle().map(|h| h.as_raw()) {
+                        return Some(h.hwnd.get());
                     }
+                    #[cfg(target_os = "macos")]
+                    if let Ok(raw_window_handle::RawWindowHandle::AppKit(h)) = w.window_handle().map(|h| h.as_raw()) {
+                        return Some(h.ns_view.as_ptr() as isize);
+                    }
+                    #[cfg(not(any(windows, target_os = "macos")))]
+                    let _ = w;
+                    None
                 })
-                .map(Message::Hwnd);
+                .map(Message::WindowHandle);
                 if app.connect_when_ready {
                     app.connect_when_ready = false;
                     return Task::batch([hwnd, app.connect()]);
@@ -469,6 +577,12 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
                 // maximized some other way (e.g. dragged to the top edge): full screen instead
                 return Task::batch([resize, window::is_maximized(id).map(Message::MaximizedCheck)]);
             }
+            // asked once the full-screen animation is over (winit's mode changes during it)
+            #[cfg(target_os = "macos")]
+            if matches!(app.screen, Screen::Remote) && app.input.is_some() {
+                let settled = Task::perform(async { tokio::time::sleep(std::time::Duration::from_millis(600)).await }, |()| ()).then(move |_| window::mode(id));
+                return Task::batch([resize, settled.map(Message::ModeCheck)]);
+            }
             return resize;
         }
         Message::MaximizeRequested | Message::MaximizedCheck(true) => {
@@ -477,6 +591,28 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             }
         }
         Message::MaximizedCheck(false) => {}
+        #[cfg(target_os = "macos")]
+        Message::ModeCheck(mode) => {
+            // entered / left full screen with the green button or the system menu: follow it
+            let full = mode == window::Mode::Fullscreen;
+            if full != app.fullscreen {
+                crate::log::line(&format!("window mode: full screen {full} (window {}x{} points)", app.window_size.width, app.window_size.height));
+            }
+            if full != app.fullscreen {
+                app.fullscreen = full;
+                if full {
+                    app.bar.visible = true;
+                    return Task::batch([app.schedule_bar_hide(2000), app.schedule_resize()]);
+                }
+                return app.schedule_resize();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Message::LedPoll => {
+            if local_leds() != app.leds_sent {
+                app.sync_leds();
+            }
+        }
         Message::Minimize => {
             if let Some(id) = app.window {
                 return window::minimize(id, true);
@@ -548,12 +684,16 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             app.focused = true;
             app.sync_leds();
         }
-        Message::Hwnd(h) => {
+        Message::WindowHandle(h) => {
             #[cfg(windows)]
             if let Some(h) = h {
                 crate::native_cursor::install(h);
                 crate::keyhook::install(h);
                 crate::maximize::install(h);
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(h) = h {
+                crate::mac_cursor::install(h);
             }
             let _ = h;
         }
@@ -604,8 +744,23 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
                 Some(Event::Error) | Some(Event::Rejected) => app.status = format!("error: {}", e.text),
                 _ => {}
             },
-            Update::Stream(s) => app.stream = Some(s),
-            Update::FrameReady => app.frame = app.frames.take(),
+            Update::Stream(s) => {
+                crate::log::line(&format!("stream: {}x{} {}", s.width, s.height, s.description.split(' ').next().unwrap_or("")));
+                app.first_frame_logged = false;
+                app.stream = Some(s);
+            }
+            Update::FrameReady => {
+                app.frame = app.frames.take();
+                if !app.first_frame_logged
+                    && let Some(f) = &app.frame
+                {
+                    app.first_frame_logged = true;
+                    crate::log::line(&format!(
+                        "first frame {}x{} (window {}x{} points, full screen {})",
+                        f.width, f.height, app.window_size.width, app.window_size.height, app.fullscreen
+                    ));
+                }
+            }
             Update::CursorShape(c) => app.cursor_shape = Some(c),
             Update::CursorPos(p) => app.cursor_pos = Some(p),
             Update::Clipboard(_) => {}
@@ -641,6 +796,25 @@ fn update_notice(app: &App) -> Element<'_, Message> {
         button(text("Update and restart").size(13)).on_press(Message::UpdateClient).style(button::secondary).into()
     };
     row![label, action].spacing(10).align_y(Alignment::Center).into()
+}
+
+/// Retina / HiDPI on a scaled display: every physical pixel (sharp, remote scaled up) or the size
+/// in points at 100% (larger picture, enlarged locally). Hidden on 100% displays.
+fn hidpi_option(app: &App) -> Element<'_, Message> {
+    if app.scale <= 1.0 {
+        return row![].into();
+    }
+    column![
+        checkbox(app.form.hidpi).label("Retina / HiDPI resolution").on_toggle(Message::HiDpi),
+        text(format!(
+            "Off: the remote desktop gets the size in points at 100% and the picture is enlarged {:.0}× (less sharp, fewer pixels to send).",
+            app.scale
+        ))
+        .size(12)
+        .color(Color::from_rgb(0.6, 0.6, 0.6)),
+    ]
+    .spacing(4)
+    .into()
 }
 
 /// Session experience: presets + individual effects (applied to the remote session only).
@@ -706,7 +880,7 @@ fn view(app: &App) -> Element<'_, Message> {
                     .spacing(8)
                     .align_y(Alignment::Center),
                 {
-                    let choices = display::choices(app.monitor);
+                    let choices = display::choices(app.display_monitor());
                     let idx = app.form.display.map(|i| i.min(choices.len() as u16 - 1)).unwrap_or(choices.len() as u16 - 1);
                     row![
                         text("Display").width(140),
@@ -714,8 +888,8 @@ fn view(app: &App) -> Element<'_, Message> {
                             slider(0..=(choices.len() as u16 - 1), idx, Message::Resolution),
                             text(format!(
                                 "{}{}",
-                                display::label(choices[idx as usize], app.monitor),
-                                if app.scale != 1.0 { format!("  ·  scale {:.0}%", app.scale * 100.0) } else { String::new() }
+                                display::label(choices[idx as usize], app.display_monitor()),
+                                if app.remote_scale() != 1.0 { format!("  ·  scale {:.0}%", app.remote_scale() * 100.0) } else { String::new() }
                             ))
                             .size(13),
                         ]
@@ -725,6 +899,7 @@ fn view(app: &App) -> Element<'_, Message> {
                     .align_y(Alignment::Center)
                 },
                 checkbox(app.form.dynamic).label("Resize the remote display with the window").on_toggle(Message::Dynamic),
+                hidpi_option(app),
                 checkbox(app.form.clipboard).label("Share the clipboard (text, images, files)").on_toggle(Message::Clipboard),
                 row![
                     text("Windows key combinations").width(140),
@@ -857,7 +1032,7 @@ pub fn run(l: Launch) -> iced::Result {
         Screen::Form | Screen::Trust { .. } => "FastRDP".to_string(),
         Screen::Remote => format!("FastRDP - {}", app.form.server),
     })
-    .subscription(|_: &App| {
+    .subscription(|app: &App| {
         let events = iced::event::listen_with(|e, _status, id| match e {
             iced::Event::Window(window::Event::Resized(s)) => Some(Message::WindowResized(id, s)),
             iced::Event::Window(window::Event::Rescaled(f)) => Some(Message::Rescaled(f)),
@@ -867,10 +1042,19 @@ pub fn run(l: Launch) -> iced::Result {
         });
         #[cfg(windows)]
         {
+            let _ = app;
             iced::Subscription::batch([events, iced::Subscription::run(maximize_requests)])
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
         {
+            // the session's Caps Lock follows the local one (immediately through the key tap when it runs)
+            let remote = matches!(app.screen, Screen::Remote) && app.input.is_some() && app.focused;
+            let leds = if remote { iced::time::every(std::time::Duration::from_millis(200)).map(|_| Message::LedPoll) } else { iced::Subscription::none() };
+            iced::Subscription::batch([events, leds])
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            let _ = app;
             events
         }
     })
@@ -930,6 +1114,31 @@ mod tests {
             let mut ui = simulator(view(&app));
             assert!(ui.find("1920 × 1080  ·  scale 150%").is_ok());
         }
+    }
+
+    #[test]
+    fn hidpi_off_uses_points_at_100_percent() {
+        let mut app = App::new(form());
+        let _ = update(&mut app, Message::Monitor(Some(window::Id::unique()), Some(Size::new(1512.0, 982.0)), 2.0)); // MacBook Pro 14"
+        {
+            let mut ui = simulator(view(&app));
+            assert!(ui.find("Full screen (3024 × 1964)  ·  scale 200%").is_ok());
+            assert!(ui.find("Retina / HiDPI resolution").is_ok());
+        }
+        let _ = update(&mut app, Message::HiDpi(false));
+        {
+            let mut ui = simulator(view(&app));
+            assert!(ui.find("Full screen (1512 × 982)").is_ok(), "logical size, no scale suffix");
+        }
+        // dynamic resize: window points = remote pixels
+        app.form.dynamic = true;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.input = Some(tx);
+        app.screen = Screen::Remote;
+        app.fullscreen = true;
+        app.window_size = Size::new(1512.0, 982.0);
+        app.apply_resize();
+        assert!(matches!(rx.try_recv(), Ok(InputCmd::Display(d)) if (d.width, d.height, d.scale_percent) == (1512, 982, 100)));
     }
 
     #[test]

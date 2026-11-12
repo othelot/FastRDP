@@ -46,11 +46,14 @@ pub struct Prefs {
     pub dynamic: bool,
     pub clipboard: bool,
     pub keys: KeyCombos,
+    /// remote desktop in physical pixels at the display's scale (Retina / HiDPI); off = in
+    /// logical points at 100%, enlarged locally
+    pub hidpi: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { performance_flags: protocol::perf::BEST_QUALITY, display: None, dynamic: true, clipboard: true, keys: KeyCombos::Remote }
+        Prefs { performance_flags: protocol::perf::BEST_QUALITY, display: None, dynamic: true, clipboard: true, keys: KeyCombos::Remote, hidpi: true }
     }
 }
 
@@ -74,6 +77,7 @@ fn parse(line: &str) -> Option<(String, Prefs)> {
             Some(("dynamic", v)) => p.dynamic = v == "1",
             Some(("clipboard", v)) => p.clipboard = v == "1",
             Some(("keys", v)) => p.keys = KeyCombos::from_key(v),
+            Some(("hidpi", v)) => p.hidpi = v == "1",
             _ => {}
         }
     }
@@ -82,7 +86,14 @@ fn parse(line: &str) -> Option<(String, Prefs)> {
 
 fn format(server: &str, p: &Prefs) -> String {
     let res = p.display.map(|i| i.to_string()).unwrap_or_else(|| "full".into());
-    format!("{server} perf=0x{:X} res={res} dynamic={} clipboard={} keys={}\n", p.performance_flags, p.dynamic as u8, p.clipboard as u8, p.keys.key())
+    format!(
+        "{server} perf=0x{:X} res={res} dynamic={} clipboard={} keys={} hidpi={}\n",
+        p.performance_flags,
+        p.dynamic as u8,
+        p.clipboard as u8,
+        p.keys.key(),
+        p.hidpi as u8
+    )
 }
 
 fn entries() -> Vec<(String, Prefs)> {
@@ -116,12 +127,20 @@ mod tests {
 
     #[test]
     fn line_roundtrip() {
-        let p = Prefs { performance_flags: protocol::perf::BALANCED, display: Some(7), dynamic: false, clipboard: false, keys: KeyCombos::FullScreen };
+        let p = Prefs {
+            performance_flags: protocol::perf::BALANCED,
+            display: Some(7),
+            dynamic: false,
+            clipboard: false,
+            keys: KeyCombos::FullScreen,
+            hidpi: false,
+        };
         let line = format("pc:33890", &p);
         assert_eq!(parse(line.trim()), Some(("pc:33890".to_string(), p)));
         let full = Prefs { display: None, ..Prefs::default() };
         assert_eq!(parse(format("x:1", &full).trim()).unwrap().1, full);
         assert_eq!(parse("pc:1 perf=0xFFFF").unwrap().1.performance_flags, protocol::perf::VALID);
         assert_eq!(KeyCombos::from_key("nonsense"), KeyCombos::Remote);
+        assert!(parse("pc:1 perf=0x180").unwrap().1.hidpi, "lines written before the option: HiDPI on");
     }
 }

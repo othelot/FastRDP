@@ -111,6 +111,11 @@ impl<Message: Clone> shader::Program<Message> for VideoView<Message> {
     type Primitive = VideoPrimitive;
 
     fn update(&self, state: &mut ViewState, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
+        // macOS: the native remote pointer is (re)applied on every mouse move, like Windows App
+        #[cfg(target_os = "macos")]
+        if self.native_pointer && matches!(event, Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorEntered | mouse::Event::CursorLeft)) {
+            crate::mac_cursor::refresh();
+        }
         let input = self.input.as_ref()?;
         let send = |e: InputEvent| {
             let _ = input.send(InputCmd::Event(e));

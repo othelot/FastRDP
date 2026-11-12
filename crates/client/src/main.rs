@@ -18,6 +18,10 @@ mod keyhook;
 mod keymap;
 mod known;
 mod log;
+#[cfg(target_os = "macos")]
+mod mac_cursor;
+#[cfg(target_os = "macos")]
+mod mac_keytap;
 #[cfg(windows)]
 mod maximize;
 #[cfg(windows)]
@@ -190,6 +194,7 @@ fn main() {
         dynamic: saved.dynamic,
         clipboard: saved.clipboard && !cli.no_clipboard,
         keys: saved.keys,
+        hidpi: saved.hidpi,
         server: cli.server.unwrap_or_default(),
         pin: pin.unwrap_or_default(),
         user: cli.user.unwrap_or_default(),
@@ -202,6 +207,11 @@ fn main() {
     {
         let (sent, local, failed) = keyhook::stats();
         log::line(&format!("GUI exit: key hook sent {sent} key(s) to the session, left {local} local, {failed} send failure(s)"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (sent, local, failed) = mac_keytap::stats();
+        log::line(&format!("GUI exit: key tap sent {sent} key(s) to the session, left {local} local, {failed} send failure(s)"));
     }
     if let Err(e) = r {
         log::line(&format!("ui error: {e}"));

@@ -59,7 +59,11 @@ impl Access for System {
             // SAFETY: trivial query.
             Some(unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() } as u64)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            Some(objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u64)
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             None
         }
