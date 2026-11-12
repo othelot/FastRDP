@@ -18,8 +18,10 @@ built-in `RDP-Tcp` listener is never modified. Every install step has an uninsta
 > session made by a protocol it considers compatible, and it considers a protocol RDP only for two
 > built-in CLSIDs. By default FastRDP's provider is registered under the second one, an internal
 > test CLSID that Windows itself does not register, so FastRDP and mstsc reconnect to each other's
-> sessions. This is unofficial. `Install-FastRdpProvider.ps1 -NativeClsid` uses FastRDP's own
-> CLSID instead: then FastRDP and mstsc each keep their own session for the same user. Sessions
+> sessions. This is unofficial. If another program has registered that CLSID, the installer asks
+> before replacing it (backed up, restored on uninstall) and cancels otherwise; automatic updates
+> never replace it. `-ClsidMode Native` (web installer) / `Install-FastRdpProvider.ps1 -NativeClsid`
+> uses FastRDP's own CLSID instead: then FastRDP and mstsc each keep their own session. Sessions
 > created in one mode cannot be reconnected in the other (sign out of them once after switching).
 > Details: [docs/architecture.md](docs/architecture.md#session-arbitration).
 

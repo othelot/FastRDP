@@ -65,3 +65,41 @@ function Test-InRdpSession {
 }
 
 function Get-FastRdpClsidKey([string]$Clsid) { "HKLM:\SOFTWARE\Classes\CLSID\$Clsid" }
+
+# Who has the RDP-compatible CLSID, if not FastRDP: $null = free or FastRDP's, else a description
+# of the other registration (its server path, or the key itself).
+function Get-ForeignClsidOwner {
+    $key = Get-FastRdpClsidKey $FastRdp.RdpCompatibleClsid
+    if (-not (Test-Path $key)) { return $null }
+    $inproc = (Get-ItemProperty "$key\InprocServer32" -ErrorAction SilentlyContinue).'(default)'
+    if ($inproc -and $inproc -like "*\$($FastRdp.DllName)") { return $null }
+    foreach ($sub in 'InprocServer32', 'LocalServer32') {
+        $v = (Get-ItemProperty "$key\$sub" -ErrorAction SilentlyContinue).'(default)'
+        if ($v) { return "$sub = $v" }
+    }
+    $name = (Get-ItemProperty $key -ErrorAction SilentlyContinue).'(default)'
+    if ($name) { "'$name'" } else { "registry key $key" }
+}
+
+# Asks before taking over the RDP-compatible CLSID from another program. Returns $true to replace;
+# throws (installation cancelled, nothing changed) otherwise. -Replace: no question.
+# -NoPrompt (automatic update): never replaces another program's registration.
+function Confirm-ReplaceForeignClsid([switch]$Replace, [switch]$NoPrompt) {
+    $owner = Get-ForeignClsidOwner
+    if (-not $owner) { return $false }
+    $msg = "The CLSID FastRDP uses to be treated like Remote Desktop, $($FastRdp.RdpCompatibleClsid), is already registered by another program ($owner)."
+    if ($Replace) { Write-Warning "$msg Replacing it (-ReplaceForeignClsid); it is backed up and restored when FastRDP is uninstalled."; return $true }
+    if ($NoPrompt) { throw "$msg Not replaced automatically - nothing was changed. Install interactively to decide." }
+    Write-Warning $msg
+    Write-Host '  Replacing it makes that program stop working while FastRDP is installed. The registration is backed up'
+    Write-Host '  and restored when FastRDP is uninstalled. Alternatively, cancel and install with FastRDP''s own CLSID'
+    Write-Host '  (-ClsidMode Native; Install-FastRdpProvider.ps1: -NativeClsid): then FastRDP and Microsoft Remote'
+    Write-Host '  Desktop keep separate sessions.'
+    # only an explicit yes replaces (no answer, e.g. a non-interactive host returning $null, cancels)
+    $a = Read-Host 'Replace it? [y/N]'
+    if ("$a".Trim() -match '^(y|yes)$') { return $true }
+    throw 'Installation cancelled - nothing was changed.'
+}
+
+# Backup of a foreign registration FastRDP replaced (restored by the uninstaller).
+$script:FastRdp.ReplacedClsidBackup = Join-Path $FastRdp.DataDir 'replaced-clsid.reg'

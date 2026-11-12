@@ -32,6 +32,13 @@ foreach ($c in $FastRdp.NativeClsid, $FastRdp.RdpCompatibleClsid) {
         Remove-Item $ck -Recurse -Force; Write-Host "Removed COM registration $c"
     }
 }
+# a registration of another program that the installer replaced: put it back
+if (Test-Path $FastRdp.ReplacedClsidBackup) {
+    # reg.exe reports success on stderr: let cmd.exe swallow it (PowerShell 5.1 would treat it as an error)
+    $null = & cmd.exe /c "reg.exe import `"$($FastRdp.ReplacedClsidBackup)`" >nul 2>&1"
+    if ($LASTEXITCODE) { Write-Warning "Could not restore $($FastRdp.ReplacedClsidBackup) - import it manually: reg import `"$($FastRdp.ReplacedClsidBackup)`"" }
+    else { Remove-Item $FastRdp.ReplacedClsidBackup -Force; Write-Host "Restored the other program's registration of $($FastRdp.RdpCompatibleClsid)" }
+}
 
 if ($RestartTermService) {
     # Restart first so svchost unloads the (pinned) DLL, then delete it.

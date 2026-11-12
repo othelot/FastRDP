@@ -29,6 +29,11 @@ param(
     [switch]$NoVirtualChannels,
     # register under FastRDP's own CLSID (sessions are then not shared with Microsoft's RDP client)
     [switch]$NativeClsid,
+    # the RDP-compatible CLSID is registered by another program: replace it without asking
+    # (backed up, restored on uninstall). Without it the installer asks.
+    [switch]$ReplaceForeignClsid,
+    # no questions (automatic update): another program's registration is never replaced
+    [switch]$NoPrompt,
     [switch]$RestartTermService,
     [switch]$AcknowledgeRdpDisconnect
 )
@@ -43,11 +48,8 @@ $DllPath = (Resolve-Path $DllPath).Path
 $clsid = if ($NativeClsid) { $FastRdp.NativeClsid } else { $FastRdp.RdpCompatibleClsid }
 $otherClsid = if ($NativeClsid) { $FastRdp.RdpCompatibleClsid } else { $FastRdp.NativeClsid }
 $clsidKey = Get-FastRdpClsidKey $clsid
-# The RDP-compatible CLSID must be free (Windows does not register it): never take over a foreign one.
-if (-not $NativeClsid -and (Test-Path "$clsidKey\InprocServer32")) {
-    $existing = (Get-ItemProperty "$clsidKey\InprocServer32").'(default)'
-    if ($existing -and $existing -notlike "*\$($FastRdp.DllName)") { throw "$clsid is registered for '$existing'; use -NativeClsid." }
-}
+# Windows does not register the RDP-compatible CLSID; another program might. Ask before replacing.
+$replaceForeign = (-not $NativeClsid) -and (Confirm-ReplaceForeignClsid -Replace:$ReplaceForeignClsid -NoPrompt:$NoPrompt)
 
 # ---- backup / state ----
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -92,6 +94,16 @@ if ($same) {
 $hash = (Get-FileHash $target -Algorithm SHA256).Hash
 
 # ---- 2. COM registration (HKLM, in-proc) ----
+if ($replaceForeign) {
+    # keep the other program's registration for the uninstaller (the first one only, never ours)
+    New-Item -ItemType Directory -Force $FastRdp.DataDir | Out-Null
+    if (-not (Test-Path $FastRdp.ReplacedClsidBackup)) {
+        & reg.exe export "HKLM\SOFTWARE\Classes\CLSID\$clsid" $FastRdp.ReplacedClsidBackup /y | Out-Null
+        if ($LASTEXITCODE) { throw "Could not back up the existing registration of $clsid - nothing was replaced." }
+    }
+    Remove-Item $clsidKey -Recurse -Force
+    Write-Host "Replaced the other program's registration of $clsid (backup: $($FastRdp.ReplacedClsidBackup))"
+}
 New-Item -Force $clsidKey | Out-Null
 Set-ItemProperty $clsidKey -Name '(default)' -Value 'FastRDP Protocol Manager (IWRdsProtocolManager)'
 $inproc = Join-Path $clsidKey 'InprocServer32'

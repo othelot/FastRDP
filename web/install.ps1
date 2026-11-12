@@ -3,6 +3,8 @@
 #   install / update : irm https://fastrdp.dev | iex
 #   uninstall        : & ([scriptblock]::Create((irm https://fastrdp.dev))) -Uninstall
 #   options          : -Yes (no questions)  -AutoUpdate On|Off  -AllowPublicNetwork  -Purge (uninstall: also server key, logs)
+#                      -ClsidMode Native|RdpCompatible (Native: sessions not shared with Microsoft Remote Desktop)
+#                      -ReplaceForeignClsid (another program registered FastRDP's RDP-compatible CLSID: replace it)
 #
 # Source and release files: https://github.com/othelot/fastrdp
 # This file is a template: tools/New-FastRdpRelease.ps1 fills in the version and the package hash.
@@ -12,11 +14,13 @@ param(
     [switch]$Purge,
     [ValidateSet('Keep', 'On', 'Off')][string]$AutoUpdate = 'Keep',
     # also accept connections on networks Windows classifies as Public
-    [switch]$AllowPublicNetwork
+    [switch]$AllowPublicNetwork,
+    [ValidateSet('Keep', 'RdpCompatible', 'Native')][string]$ClsidMode = 'Keep',
+    [switch]$ReplaceForeignClsid
 )
 
 function Invoke-FastRdpSetup {
-    param([switch]$Uninstall, [switch]$Yes, [switch]$Purge, [string]$AutoUpdate, [switch]$AllowPublicNetwork)
+    param([switch]$Uninstall, [switch]$Yes, [switch]$Purge, [string]$AutoUpdate, [switch]$AllowPublicNetwork, [string]$ClsidMode, [switch]$ReplaceForeignClsid)
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell downloads are very slow with a progress bar
 
@@ -49,6 +53,8 @@ function Invoke-FastRdpSetup {
         if ($Yes) { $cmd += ' -Yes' }
         if ($Purge) { $cmd += ' -Purge' }
         if ($AllowPublicNetwork) { $cmd += ' -AllowPublicNetwork' }
+        $cmd += " -ClsidMode $ClsidMode"
+        if ($ReplaceForeignClsid) { $cmd += ' -ReplaceForeignClsid' }
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
         Write-Host 'Administrator rights are needed - opening an elevated PowerShell window ...'
         Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -NoExit -EncodedCommand $enc"
@@ -121,7 +127,7 @@ Everything is removed again with -Uninstall.
         Start-Transcript -Path (Join-Path $logDir 'setup.log') -Append | Out-Null
         try {
             $pkg = Get-Package
-            & (Join-Path $pkg 'scripts\Install-FastRdp.ps1') -PackageDir $pkg -AutoUpdate $AutoUpdate @fw
+            & (Join-Path $pkg 'scripts\Install-FastRdp.ps1') -PackageDir $pkg -AutoUpdate $AutoUpdate @fw -ClsidMode $ClsidMode -ReplaceForeignClsid:$ReplaceForeignClsid
             $fp = Get-Content (Join-Path $env:ProgramData 'FastRDP\server\cert.sha256') -ErrorAction SilentlyContinue
             Write-Host ''
             Write-Host "FastRDP $version installed." -ForegroundColor Green
@@ -136,4 +142,4 @@ Everything is removed again with -Uninstall.
     }
 }
 
-Invoke-FastRdpSetup -Uninstall:$Uninstall -Yes:$Yes -Purge:$Purge -AutoUpdate $AutoUpdate -AllowPublicNetwork:$AllowPublicNetwork
+Invoke-FastRdpSetup -Uninstall:$Uninstall -Yes:$Yes -Purge:$Purge -AutoUpdate $AutoUpdate -AllowPublicNetwork:$AllowPublicNetwork -ClsidMode $ClsidMode -ReplaceForeignClsid:$ReplaceForeignClsid

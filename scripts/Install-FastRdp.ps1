@@ -19,7 +19,12 @@ param(
     [ValidateSet('Keep', 'On', 'Off')][string]$AutoUpdate = 'Keep',
     # firewall profiles for UDP 33890 (default: keep the existing rule's, else Private)
     [ValidateSet('Domain', 'Private', 'Public', 'Any')][string[]]$FirewallProfile,
-    # started by fastrdp-update.exe (the update task must not be re-registered while it runs)
+    # the RDP-compatible CLSID is registered by another program: replace it without asking
+    [switch]$ReplaceForeignClsid,
+    # RdpCompatible: sessions shared with Microsoft Remote Desktop (default for new installs);
+    # Native: FastRDP's own CLSID. Keep (default): what the previous install used.
+    [ValidateSet('Keep', 'RdpCompatible', 'Native')][string]$ClsidMode = 'Keep',
+    # started by fastrdp-update.exe (the update task must not be re-registered while it runs; no questions)
     [switch]$Unattended
 )
 $ErrorActionPreference = 'Stop'
@@ -36,6 +41,10 @@ $auto = switch ($AutoUpdate) {
     default { if ($null -eq $current.AutoUpdate) { 1 } else { [int]$current.AutoUpdate } }
 }
 Write-Host "Installing FastRDP $version$(if ($previous) { " (installed: $previous)" })"
+# CLSID mode: an explicit -ClsidMode is remembered (HKLMSOFTWAREFastRDP NativeClsid), so updates keep it
+$native = switch ($ClsidMode) { 'Native' { $true } 'RdpCompatible' { $false } default { [bool]$current.NativeClsid } }
+# decided before anything is installed, so cancelling leaves the computer unchanged
+$replace = (-not $native) -and (Confirm-ReplaceForeignClsid -Replace:$ReplaceForeignClsid -NoPrompt:$Unattended)
 
 # 1 + 2
 & "$PSScriptRoot\Install-FastRdpIdd.ps1" -PackageDir (Join-Path $PackageDir 'driver\FastRdpIdd') -CertFile (Join-Path $PackageDir 'driver\FastRdpDriverPublisher.cer')
@@ -60,6 +69,7 @@ Copy-Item (Join-Path $keep 'scripts\*.ps1') $scriptsDir -Force
 New-Item $settingsKey -Force | Out-Null
 Set-ItemProperty $settingsKey -Name InstalledVersion -Value $version
 Set-ItemProperty $settingsKey -Name AutoUpdate -Value $auto -Type DWord
+Set-ItemProperty $settingsKey -Name NativeClsid -Value ([int]$native) -Type DWord
 $taskName = 'FastRDP Update'
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($auto -and -not ($task -and $Unattended)) {
@@ -80,7 +90,8 @@ if ($auto -and -not ($task -and $Unattended)) {
 }
 
 # 5
-& "$PSScriptRoot\Install-FastRdpProvider.ps1" -DllPath (Join-Path $PackageDir 'bin\fastrdp_provider.dll') -RestartTermService -AcknowledgeRdpDisconnect
+& "$PSScriptRoot\Install-FastRdpProvider.ps1" -DllPath (Join-Path $PackageDir 'bin\fastrdp_provider.dll') -RestartTermService -AcknowledgeRdpDisconnect `
+    -NativeClsid:$native -ReplaceForeignClsid:$replace -NoPrompt
 
 # 6
 Start-Sleep 2
