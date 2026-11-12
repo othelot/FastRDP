@@ -32,8 +32,22 @@ pub fn monitor_hz(window: isize) -> Option<u32> {
     }
 }
 
-/// Not implemented yet on this platform (macOS: NSScreen.maximumFramesPerSecond of the window's screen).
-#[cfg(not(windows))]
+/// macOS: `maximumFramesPerSecond` of the screen the window is on (ProMotion: 120). `window` is
+/// winit's NSView; AppKit, so main thread only (iced runs update there).
+#[cfg(target_os = "macos")]
+pub fn monitor_hz(window: isize) -> Option<u32> {
+    use objc2_app_kit::NSView;
+    objc2::MainThreadMarker::new()?;
+    if window == 0 {
+        return None;
+    }
+    // SAFETY: winit's NSView from raw-window-handle, alive as long as the window; only read here.
+    let view: &NSView = unsafe { &*(window as *const NSView) };
+    let hz = view.window()?.screen()?.maximumFramesPerSecond();
+    u32::try_from(hz).ok().filter(|&hz| hz > 1)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn monitor_hz(_window: isize) -> Option<u32> {
     None
 }

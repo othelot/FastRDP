@@ -121,6 +121,8 @@ pub enum Message {
     WindowHandle(Option<isize>),
     /// the window moved (maybe to a monitor with another refresh rate)
     WindowMoved,
+    /// Tab / Shift+Tab not used by a widget: next / previous text field
+    FocusNext(bool),
 }
 
 enum Screen {
@@ -152,6 +154,11 @@ struct App {
     last_display: Option<protocol::DisplayRequest>,
     /// native window handle (refresh rate of its monitor)
     native_window: Option<isize>,
+    /// window change for the session (full screen, or a window whose picture is this size),
+    /// applied once the session streams: a failed sign-in or connection leaves the window alone
+    pending_sizing: Option<(bool, Size)>,
+    /// window size before the session changed it, restored when the session ends
+    form_window: Option<Size>,
     /// --password-env given: connect once the monitor is known
     connect_when_ready: bool,
     show_effects: bool,
@@ -203,6 +210,8 @@ impl App {
             resize_gen: 0,
             last_display: None,
             native_window: None,
+            pending_sizing: None,
+            form_window: None,
             connect_when_ready: false,
             show_effects: false,
             focused: true,
@@ -371,7 +380,7 @@ impl App {
         let choice = self.choice();
         let (w, h) = display::size_of(choice, self.display_monitor());
         let req = display::request(w, h, self.remote_scale(), self.refresh_hz(), self.form.bitrate_mbps * 1000);
-        self.fullscreen = choice == Choice::FullScreen;
+        let full = choice == Choice::FullScreen;
         self.last_display = Some(req);
         crate::log::line(&format!(
             "display: connect at {}x{}@{} {}% (full screen {})",
@@ -440,15 +449,33 @@ impl App {
             .expect("session thread");
         self.status = format!("connecting to {server} ...");
         self.screen = Screen::Remote;
-        // window: picture area = remote desktop, 1:1
-        let sizing = match self.window {
-            Some(id) if self.fullscreen => window::set_mode(id, window::Mode::Fullscreen),
-            Some(id) => window::set_mode::<Message>(id, window::Mode::Windowed)
-                .chain(window::maximize(id, false))
-                .chain(window::resize(id, display::window_for(req.width, req.height, self.remote_scale()))),
-            None => Task::none(),
+        // window: picture area = remote desktop, 1:1 - once the session streams (apply_sizing)
+        self.pending_sizing = Some((full, display::window_for(req.width, req.height, self.remote_scale())));
+        Task::run(rx, Message::Session)
+    }
+
+    /// The session streams: full screen, or a window whose picture is the remote desktop (1:1).
+    fn apply_sizing(&mut self) -> Task<Message> {
+        let (Some((full, size)), Some(id)) = (self.pending_sizing.take(), self.window) else { return Task::none() };
+        self.form_window = Some(self.window_size);
+        if full {
+            return self.set_fullscreen(true);
+        }
+        window::set_mode::<Message>(id, window::Mode::Windowed).chain(window::maximize(id, false)).chain(window::resize(id, size))
+    }
+
+    /// The session ended: the window as it was before the session (never changed if it did not stream).
+    fn restore_window(&mut self) -> Task<Message> {
+        self.pending_sizing = None;
+        let was_full = std::mem::replace(&mut self.fullscreen, false);
+        let (Some(id), Some(size)) = (self.window, self.form_window.take()) else {
+            return match (self.window, was_full) {
+                (Some(id), true) => window::set_mode(id, window::Mode::Windowed),
+                _ => Task::none(),
+            };
         };
-        Task::batch([Task::run(rx, Message::Session), sizing])
+        let windowed = if was_full { window::set_mode::<Message>(id, window::Mode::Windowed) } else { Task::none() };
+        windowed.chain(window::maximize(id, false)).chain(window::resize(id, size))
     }
 }
 
@@ -571,7 +598,13 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
         Message::HiDpi(b) => app.form.hidpi = b,
         Message::Bitrate(m) => app.form.bitrate_mbps = m,
         Message::User(s) => app.form.user = s,
-        Message::Password(s) => app.form.password = s,
+        Message::Password(mut s) => {
+            // like mstsc: what the keys say in the English layout, whatever the input language
+            let keys = crate::password::latin_keys(&s);
+            wipe_string(&mut s);
+            wipe_string(&mut app.form.password);
+            app.form.password = keys;
+        }
         Message::Connect => return app.connect(),
         Message::Monitor(id, size, scale) => {
             app.window = id;
@@ -736,6 +769,11 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
             let _ = h;
         }
         Message::WindowMoved => app.sync_refresh(),
+        Message::FocusNext(back) => {
+            if !matches!(app.screen, Screen::Remote) {
+                return if back { iced::widget::operation::focus_previous() } else { iced::widget::operation::focus_next() };
+            }
+        }
         Message::ToggleFullscreen => return app.set_fullscreen(!app.fullscreen),
         Message::Disconnect => {
             if let Some(i) = app.input.take() {
@@ -787,6 +825,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
                 crate::log::line(&format!("stream: {}x{} {}", s.width, s.height, s.description.split(' ').next().unwrap_or("")));
                 app.first_frame_logged = false;
                 app.stream = Some(s);
+                return app.apply_sizing();
             }
             Update::FrameReady => {
                 app.frame = app.frames.take();
@@ -813,12 +852,7 @@ fn update_inner(app: &mut App, msg: Message) -> Task<Message> {
                 app.status = if reason.starts_with("sign-in failed") { reason } else { format!("disconnected: {reason}") };
                 app.input = None;
                 app.screen = Screen::Form;
-                if app.fullscreen {
-                    app.fullscreen = false;
-                    if let Some(id) = app.window {
-                        return window::set_mode(id, window::Mode::Windowed);
-                    }
-                }
+                return app.restore_window();
             }
         },
     }
@@ -929,9 +963,12 @@ fn view(app: &App) -> Element<'_, Message> {
                 field("Server (host:port)", &app.form.server, Message::Server),
                 field("User name", &app.form.user, Message::User),
                 text("Local account: name only. Domain: DOMAIN\\name or name@domain.").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
-                row![text("Password").width(140), text_input("", &app.form.password).secure(true).on_input(Message::Password).on_submit(Message::Connect)]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
+                row![
+                    text("Password").width(140),
+                    crate::password::no_ime(text_input("", &app.form.password).secure(true).on_input(Message::Password).on_submit(Message::Connect))
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
                 {
                     let choices = display::choices(app.display_monitor());
                     let idx = app.form.display.map(|i| i.min(choices.len() as u16 - 1)).unwrap_or(choices.len() as u16 - 1);
@@ -1093,7 +1130,11 @@ pub fn run(l: Launch) -> iced::Result {
         Screen::Remote => format!("FastRDP - {}", app.form.server),
     })
     .subscription(|app: &App| {
-        let events = iced::event::listen_with(|e, _status, id| match e {
+        let events = iced::event::listen_with(|e, status, id| match e {
+            // the remote screen captures its keys; elsewhere Tab moves between the text fields
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab), modifiers, ..
+            }) if status == iced::event::Status::Ignored => Some(Message::FocusNext(modifiers.shift())),
             iced::Event::Window(window::Event::Resized(s)) => Some(Message::WindowResized(id, s)),
             iced::Event::Window(window::Event::Rescaled(f)) => Some(Message::Rescaled(f)),
             iced::Event::Window(window::Event::Moved(_)) => Some(Message::WindowMoved),
@@ -1321,5 +1362,28 @@ mod tests {
         // the password is wiped once the TLS handshake succeeded
         let _ = update(&mut app, Message::Session(Update::Connected { max_datagram: Some(1200) }));
         assert!(app.form.password.is_empty());
+    }
+
+    #[test]
+    fn window_changes_only_for_a_streaming_session() {
+        let stream = || StreamInfo { width: 1920, height: 1080, fps: 60, encoder: 0, fallback: false, description: String::new() };
+        let mut app = App::new(form());
+        let _ = update(&mut app, Message::Monitor(Some(window::Id::unique()), Some(Size::new(1920.0, 1080.0)), 1.0));
+        app.screen = Screen::Remote;
+        app.window_size = Size::new(1280.0, 760.0);
+        // sign-in fails before any video: the window stays as it is
+        app.pending_sizing = Some((true, Size::new(1920.0, 1110.0)));
+        let _ = update(&mut app, Message::Session(Update::Ended("sign-in failed: wrong password".into())));
+        assert!(app.pending_sizing.is_none() && app.form_window.is_none() && !app.fullscreen);
+        // a session that streams goes full screen and gives the form window back at the end
+        app.screen = Screen::Remote;
+        app.pending_sizing = Some((true, Size::new(1920.0, 1110.0)));
+        let _ = update(&mut app, Message::Session(Update::Stream(stream())));
+        assert!(app.fullscreen && app.pending_sizing.is_none());
+        assert_eq!(app.form_window, Some(Size::new(1280.0, 760.0)));
+        let _ = update(&mut app, Message::Session(Update::Stream(stream())));
+        assert_eq!(app.form_window, Some(Size::new(1280.0, 760.0)), "later streams (resize, fallback) change nothing");
+        let _ = update(&mut app, Message::Session(Update::Ended("disconnected by user".into())));
+        assert!(!app.fullscreen && app.form_window.is_none());
     }
 }

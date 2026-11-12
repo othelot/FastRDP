@@ -26,6 +26,7 @@ mod mac_keytap;
 mod maximize;
 #[cfg(windows)]
 mod native_cursor;
+mod password;
 mod prefs;
 mod refresh;
 mod selfupdate;
