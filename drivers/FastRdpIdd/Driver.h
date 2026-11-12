@@ -106,6 +106,9 @@ private:
     // IddCxMonitorUpdateModes + IddCxAdapterDisplayConfigUpdate (remote IDD "scenario 4").
     static DWORD CALLBACK ControlThread(LPVOID Argument);
     void ControlLoop();
+    // Before monitor arrival: puts the client's requested mode (if the server wrote one) in front of
+    // the target mode list the OS queries during arrival.
+    void TakeInitialRequest();
     void ProcessControl(bool initial);
 
     WDFDEVICE m_WdfDevice;
@@ -113,6 +116,8 @@ private:
     IDDCX_MONITOR m_Monitor{};
     ULONG m_SessionId = 0xFFFFFFFF;
     std::wstring m_InstanceId;
+    // request taken by TakeInitialRequest, answered by the initial ProcessControl (0 = none)
+    uint32_t m_InitialRequestId = 0;
     Microsoft::WRL::Wrappers::Event m_hStopControl;
     Microsoft::WRL::Wrappers::Thread m_hControlThread;
 };

@@ -668,6 +668,7 @@ void IndirectDeviceContext::FinishInit()
     auto* pWrapper = WdfObjectGet_IndirectMonitorContextWrapper(m_Monitor);
     pWrapper->pContext = new IndirectMonitorContext(m_Monitor, m_SessionId);
 
+    TakeInitialRequest();
     IDARG_OUT_MONITORARRIVAL ArrivalOut = {};
     Status = IddCxMonitorArrival(m_Monitor, &ArrivalOut);
     Log(L"IddCxMonitorArrival -> 0x%08X (adapter LUID %08X:%08X, target %u)", Status,
@@ -696,31 +697,57 @@ void IndirectDeviceContext::ControlLoop()
     Log(L"display control thread stopped (session %lu)", m_SessionId);
 }
 
-// Initial call (monitor arrival): always applies a configuration - the client's request if the
-// server already wrote one, else the default mode. Later calls: only new requests.
+// A client display request clamped to what the frame shared memory and the encoders accept.
+static void ModeFromRequest(const FastRdpShmControl& c, ModeEntry& mode, UINT& scale)
+{
+    UINT w = std::min<UINT>(std::max<UINT>(c.width, 640), FASTRDP_SHM_MAX_WIDTH) & ~7u;
+    UINT h = std::min<UINT>(std::max<UINT>(c.height, 480), FASTRDP_SHM_MAX_HEIGHT) & ~1u;
+    UINT hz = (c.refresh_hz >= 24 && c.refresh_hz <= 240) ? c.refresh_hz : 60;
+    mode = { w, h, hz };
+    scale = (c.scale_percent >= 100 && c.scale_percent <= 500) ? c.scale_percent : 100;
+}
+
+// The OS asks for the monitor's target modes during IddCxMonitorArrival and the initial
+// IddCxAdapterDisplayConfigUpdate is rejected (0xC000000D) for a mode that was not in that list -
+// the session then has no active path and no frames until the next (change) request. Observed
+// 2026-11-12 with macOS clients (1728x1116, 3456x2160); standard sizes were in the default list.
+void IndirectDeviceContext::TakeInitialRequest()
+{
+    auto& pub = FramePublisher::Instance();
+    pub.Ensure(m_SessionId);   // the server may have created the section already
+    FastRdpShmControl c{};
+    if (!pub.ReadControl(c)) return;
+    ModeEntry mode;
+    UINT scale;
+    ModeFromRequest(c, mode, scale);
+    auto& dm = DisplayModes::Get();
+    dm.Prefer(mode);
+    {
+        std::lock_guard<std::mutex> g(dm.lock);
+        dm.scale = scale;
+    }
+    m_InitialRequestId = c.request_id;
+    Log(L"display request #%u %ux%u@%u scale %u%% taken before monitor arrival", c.request_id, mode.Width, mode.Height, mode.RefreshHz, scale);
+}
+
+// Initial call (after monitor arrival): always applies a configuration - the client's request
+// taken by TakeInitialRequest, else the default mode. Later calls: only new requests.
 void IndirectDeviceContext::ProcessControl(bool initial)
 {
     auto& pub = FramePublisher::Instance();
-    if (initial) pub.Ensure(m_SessionId);   // the server may have created the section already
     FastRdpShmControl c{};
-    bool pending = pub.ReadControl(c);
+    bool pending = initial ? m_InitialRequestId != 0 : pub.ReadControl(c);
+    if (initial) c.request_id = m_InitialRequestId;
     if (!pending && !initial) return;
     auto& dm = DisplayModes::Get();
     ModeEntry mode;
     UINT scale;
     {
         std::lock_guard<std::mutex> g(dm.lock);
-        mode = dm.current;
+        mode = dm.current;   // initial: the taken request (TakeInitialRequest) or the default
         scale = dm.scale;
     }
-    if (pending) {
-        // Clamp to what the frame shared memory and the encoders accept.
-        UINT w = std::min<UINT>(std::max<UINT>(c.width, 640), FASTRDP_SHM_MAX_WIDTH) & ~7u;
-        UINT h = std::min<UINT>(std::max<UINT>(c.height, 480), FASTRDP_SHM_MAX_HEIGHT) & ~1u;
-        UINT hz = (c.refresh_hz >= 24 && c.refresh_hz <= 240) ? c.refresh_hz : 60;
-        mode = { w, h, hz };
-        scale = (c.scale_percent >= 100 && c.scale_percent <= 500) ? c.scale_percent : 100;
-    }
+    if (pending && !initial) ModeFromRequest(c, mode, scale);
     std::vector<ModeEntry> list = dm.Prefer(mode);
     {
         std::lock_guard<std::mutex> g(dm.lock);
