@@ -13,6 +13,7 @@
 // every dereference is null-checked and documented with a SAFETY comment.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod arbitration;
 pub mod channels;
 pub mod config;
 pub mod connection;

@@ -237,8 +237,16 @@ fn connection_worker(cfg: ListenerConfig, mut stream: Box<dyn Transport>, info: 
     };
     let creds = Credentials { domain: auth.domain.clone(), user: auth.user.clone(), password: auth.password.clone() };
     drop(auth);
+    // the account and its sessions, looked up here - outside every TermService callback - for
+    // SessionArbitrationEnumeration (arbitration.rs)
+    let existing = crate::arbitration::lookup(&creds.domain, &creds.user);
     let conn = ComObject::new(Connection::new(cfg.clone(), client, writer, creds));
     let tag = format!("Connection#{}", conn.id);
+    match &existing {
+        Some(e) => logi!("{tag}: user's sessions {:?}", e.sessions),
+        None => logw!("{tag}: account not resolved - Windows' default session arbitration applies"),
+    }
+    conn.set_existing_sessions(existing);
 
     // Same settings as Microsoft's sample: "Connections will fail if these aren't set".
     // SAFETY: all-zero is a valid WRDS_CONNECTION_SETTINGS.

@@ -75,7 +75,9 @@ pub fn guard<T>(what: &str, f: impl FnOnce() -> windows_core::Result<T>) -> wind
             if hr == 0 {
                 logi!("{what} -> hr=0x00000000");
             } else {
-                crate::log::write(if hr == E_NOTIMPL.0 as u32 { "INFO " } else { "WARN " }, &format!("{what} -> hr=0x{hr:08X}"));
+                // E_NOTIMPL, and ERROR_INSUFFICIENT_BUFFER for size queries, are expected answers
+                let expected = hr == E_NOTIMPL.0 as u32 || hr == 0x8007_007A;
+                crate::log::write(if expected { "INFO " } else { "WARN " }, &format!("{what} -> hr=0x{hr:08X}"));
             }
             r
         }

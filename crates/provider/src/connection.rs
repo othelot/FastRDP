@@ -66,6 +66,8 @@ struct State {
     channels: Vec<Arc<crate::channels::Channel>>,
     /// QueryProperty types already logged (TermService polls them constantly)
     logged_properties: std::collections::HashSet<String>,
+    /// the user's sessions when the connection was accepted (arbitration.rs)
+    existing: Option<crate::arbitration::Existing>,
 }
 
 #[implement(IWRdsProtocolConnection, IWRdsWddmIddProps, IWRdsWddmIddProps1)]
@@ -109,12 +111,18 @@ impl Connection {
                 input: None,
                 channels: Vec::new(),
                 logged_properties: Default::default(),
+                existing: None,
             }),
             closed: AtomicBool::new(false),
             broken_sent: AtomicBool::new(false),
             writer: Arc::new(Mutex::new(Some(writer))),
             next_channel: AtomicU32::new(1),
         }
+    }
+
+    /// The connecting account and its sessions (looked up before OnConnected).
+    pub fn set_existing_sessions(&self, e: Option<crate::arbitration::Existing>) {
+        self.state.lock().unwrap().existing = e;
     }
 
     fn tag(&self) -> String {
@@ -449,14 +457,44 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
         })
     }
 
-    fn SessionArbitrationEnumeration(&self, _tok: HANDLE_PTR, single: BOOL, arr: *mut u32, pcount: *mut u32) -> windows_core::Result<()> {
+    fn SessionArbitrationEnumeration(&self, tok: HANDLE_PTR, single: BOOL, arr: *mut u32, pcount: *mut u32) -> windows_core::Result<()> {
         guard(&format!("{}::SessionArbitrationEnumeration", self.tag()), || {
-            // Default arbitration (answering with a session id here made TermService terminate in
-            // the lab).
+            if pcount.is_null() {
+                return Err(E_POINTER.into());
+            }
             // SAFETY: in/out count pointer from TermService.
-            let n = if pcount.is_null() { 0 } else { unsafe { *pcount } };
-            logi!("{}::SessionArbitrationEnumeration single={} array={} capacity={n} -> E_NOTIMPL (default arbitration)", self.tag(), single.0, !arr.is_null());
-            Err(E_NOTIMPL.into())
+            let capacity = unsafe { *pcount };
+            let tag = self.tag();
+            let default = |why: &str| -> windows_core::Result<()> {
+                logi!("{tag}::SessionArbitrationEnumeration single={} array={} capacity={capacity}: {why} -> default arbitration", single.0, !arr.is_null());
+                Err(E_NOTIMPL.into())
+            };
+            if !single.as_bool() {
+                return default("several sessions per user allowed");
+            }
+            let (existing, new_session) = {
+                let st = self.state.lock().unwrap();
+                (st.existing.clone(), st.session_id)
+            };
+            let Some(existing) = existing else { return default("account not resolved when the connection was accepted") };
+            // only for the user who actually logged on (the token is TermService's: read only)
+            if crate::arbitration::token_sid(tok.0 as windows_sys::Win32::Foundation::HANDLE).as_deref() != Some(existing.sid.as_slice()) {
+                return default("the logged-on user is not the account that was looked up");
+            }
+            let Some(id) = crate::arbitration::pick(&existing.sessions, new_session) else { return default("the user has no other session") };
+            // termsrv: 1st call without an array -> count + ERROR_INSUFFICIENT_BUFFER; 2nd call fills it
+            if arr.is_null() || capacity < 1 {
+                // SAFETY: valid pointer (checked above).
+                unsafe { *pcount = 1 };
+                return Err(windows_core::HRESULT::from_win32(windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER).into());
+            }
+            // SAFETY: TermService-allocated array of `capacity` (>= 1) elements.
+            unsafe {
+                *arr = id;
+                *pcount = 1;
+            }
+            logi!("{tag}::SessionArbitrationEnumeration -> reconnect to session {id} (new session {new_session}, user's sessions {:?})", existing.sessions);
+            Ok(())
         })
     }
 
