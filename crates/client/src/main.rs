@@ -201,9 +201,6 @@ fn main() {
     #[cfg(windows)]
     {
         let (sent, local, failed) = keyhook::stats();
-        for t in keyhook::trace() {
-            log::line(&format!("keyhook trace: {t}"));
-        }
         log::line(&format!("GUI exit: key hook sent {sent} key(s) to the session, left {local} local, {failed} send failure(s)"));
     }
     if let Err(e) = r {

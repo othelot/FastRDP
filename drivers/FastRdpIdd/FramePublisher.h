@@ -22,6 +22,11 @@ public:
     bool ReadControl(FastRdpShmControl& out);
     void ReportControl(uint32_t requestId, NTSTATUS status, uint32_t width, uint32_t height, uint32_t scale);
     HANDLE ControlEvent() const { return m_hCtlEvent; }
+    // Releases the GPU objects made on `dev` (staging texture). Called by the swap-chain thread when it
+    // stops: GPU objects must never be released from the static destructor, i.e. at DLL unload under
+    // the loader lock - with a hardware GPU driver (NVIDIA) that blocked WUDFHost until UMDF killed it
+    // after 60 s, and TermService waited for that on every disconnect/reconnect.
+    void ReleaseGpu(ID3D11Device* dev);
     // Publishes hardware-cursor state; `shape` (nullptr = unchanged) is Height rows of `Pitch` bytes.
     void PublishCursor(bool visible, int32_t x, int32_t y, uint32_t shapeId, const IDDCX_CURSOR_SHAPE_INFO* info, const uint8_t* shape);
 

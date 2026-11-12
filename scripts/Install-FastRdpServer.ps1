@@ -7,14 +7,16 @@
   - Service: LOCAL SERVICE, automatic start, restart on failure: --service --bind <Bind> --listener <Listener>
   - Scheduled task "FastRDP Input Agent": runs fastrdp-agent.exe as the session user at logon and on
     every remote connect (one instance per session).
-  - Firewall: inbound UDP <port> for fastrdp-server.exe ("FastRDP Server (QUIC)", profile -FirewallProfile).
+  - Firewall: inbound UDP <port> for fastrdp-server.exe ("FastRDP Server (QUIC)"). Profiles: -FirewallProfile,
+    else those of the existing rule (an update keeps the user's choice), else Private. Warns about
+    connected networks the rule does not cover (Windows puts new networks in the Public profile).
   Undo: Uninstall-FastRdpServer.ps1
 #>
 param(
     [Parameter(Mandatory)][string]$BinDir,
     [string]$Bind = '0.0.0.0:33890',
     [string]$Listener = 'FastRDP',
-    [ValidateSet('Private', 'Domain', 'Public', 'Any')][string]$FirewallProfile = 'Private'
+    [ValidateSet('Domain', 'Private', 'Public', 'Any')][string[]]$FirewallProfile
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\FastRdpCommon.ps1"
@@ -74,9 +76,23 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logon, $r
     -Description 'FastRDP: keyboard/mouse injection agent for the current session (connects to \\.\pipe\FastRDP.Input).' | Out-Null
 
 $port = [int]($Bind.Split(':')[-1])
-Get-NetFirewallRule -DisplayName 'FastRDP Server (QUIC)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-New-NetFirewallRule -DisplayName 'FastRDP Server (QUIC)' -Direction Inbound -Protocol UDP -LocalPort $port -Action Allow `
-    -Program $server -Profile $FirewallProfile | Out-Null
+$ruleName = 'FastRDP Server (QUIC)'
+$oldRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Select-Object -First 1
+$profiles = if ($FirewallProfile) { $FirewallProfile }
+            elseif ($oldRule) { "$($oldRule.Profile)" -split ',\s*' }
+            else { @('Private') }
+Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol UDP -LocalPort $port -Action Allow `
+    -Program $server -Profile $profiles | Out-Null
+Write-Host "Firewall: UDP $port allowed on $($profiles -join ', ') networks"
+foreach ($c in Get-NetConnectionProfile -ErrorAction SilentlyContinue) {
+    $cat = if ("$($c.NetworkCategory)" -eq 'DomainAuthenticated') { 'Domain' } else { "$($c.NetworkCategory)" }
+    if ($profiles -notcontains 'Any' -and $profiles -notcontains $cat) {
+        Write-Warning ("Network '$($c.Name)' ($($c.InterfaceAlias)) is a $cat network: FastRDP cannot be reached through it. " +
+            "Make it a Private network (Settings > Network & internet > $($c.InterfaceAlias) > Private network) " +
+            "or allow $cat networks: Set-NetFirewallRule -DisplayName '$ruleName' -Profile $((@($profiles) + $cat) -join ',')")
+    }
+}
 
 Start-Service $svcName
 Start-Sleep 2

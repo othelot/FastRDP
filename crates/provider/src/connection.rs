@@ -19,7 +19,7 @@ use windows_core::{BOOL, GUID, PCSTR, PCWSTR, implement};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
 use crate::config::ListenerConfig;
-use crate::util::{E_NOTIMPL, E_POINTER, copy_to_wchar_array, from_pcwstr, guard, guid_str};
+use crate::util::{E_NOTIMPL, E_POINTER, copy_to_wchar_array, from_pcwstr, guard, guard_quiet, guid_str};
 use crate::{logi, logw};
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
@@ -64,6 +64,8 @@ struct State {
     /// session keyboard/mouse (terminpt.sys), see terminput.rs
     input: Option<Arc<crate::terminput::SessionInput>>,
     channels: Vec<Arc<crate::channels::Channel>>,
+    /// QueryProperty types already logged (TermService polls them constantly)
+    logged_properties: std::collections::HashSet<String>,
 }
 
 #[implement(IWRdsProtocolConnection, IWRdsWddmIddProps, IWRdsWddmIddProps1)]
@@ -106,6 +108,7 @@ impl Connection {
                 wddm_idd: false,
                 input: None,
                 channels: Vec::new(),
+                logged_properties: Default::default(),
             }),
             closed: AtomicBool::new(false),
             broken_sent: AtomicBool::new(false),
@@ -278,15 +281,22 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
             d.HRes = self.client.width;
             d.VRes = self.client.height;
             copy_to_wchar_array(&mut d.ProtocolName, &crate::PROTOCOL_NAME.encode_utf16().collect::<Vec<_>>());
+            // Session arbitration only reconnects a connection to sessions of the same protocol type
+            // (console excepted): with the incoming value a user's RDP session was never taken over
+            // (a new session was created instead), and RDP never picked up FastRDP's sessions.
+            // FastRDP sessions are remote desktop sessions like RDP's.
+            let incoming_type = d.ProtocolType;
+            d.ProtocolType = WTS_PROTOCOL_TYPE_RDP as u16;
             copy_to_wchar_array(&mut d.ClientName, &self.client.client_name.encode_utf16().collect::<Vec<_>>());
             copy_to_wchar_array(&mut d.ClientAddress, &self.client.peer_ip.encode_utf16().collect::<Vec<_>>());
             d.ClientAddressFamily = if self.client.peer_is_v6 { 23 } else { 2 };
             d.ClientBuildNumber = 1;
             logi!(
-                "{}::GetClientData filled PerformanceFlags=0x{:X} ProtocolName={} HRes={} VRes={} ClientName='{}' ClientAddress={} (incoming fInheritAutoLogon was overwritten)",
+                "{}::GetClientData filled PerformanceFlags=0x{:X} ProtocolName={} ProtocolType={} (incoming {incoming_type}) HRes={} VRes={} ClientName='{}' ClientAddress={}",
                 self.tag(),
                 d.PerformanceFlags,
                 crate::PROTOCOL_NAME,
+                d.ProtocolType,
                 d.HRes,
                 d.VRes,
                 self.client.client_name,
@@ -441,11 +451,13 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
         })
     }
 
-    fn SessionArbitrationEnumeration(&self, _tok: HANDLE_PTR, single: BOOL, _arr: *mut u32, pcount: *mut u32) -> windows_core::Result<()> {
+    fn SessionArbitrationEnumeration(&self, _tok: HANDLE_PTR, single: BOOL, arr: *mut u32, pcount: *mut u32) -> windows_core::Result<()> {
         guard(&format!("{}::SessionArbitrationEnumeration", self.tag()), || {
+            // Default arbitration (answering with a session id here made TermService terminate in
+            // the lab). Reconnecting across RDP/FastRDP depends on ProtocolType (GetClientData).
             // SAFETY: in/out count pointer from TermService.
             let n = if pcount.is_null() { 0 } else { unsafe { *pcount } };
-            logi!("{}::SessionArbitrationEnumeration bSingleSessionPerUserEnabled={} capacity={n} -> E_NOTIMPL (default arbitration)", self.tag(), single.0);
+            logi!("{}::SessionArbitrationEnumeration single={} array={} capacity={n} -> E_NOTIMPL (default arbitration)", self.tag(), single.0, !arr.is_null());
             Err(E_NOTIMPL.into())
         })
     }
@@ -510,7 +522,7 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
     }
 
     fn GetProtocolStatus(&self, p: *mut WTS_PROTOCOL_STATUS) -> windows_core::Result<()> {
-        guard(&format!("{}::GetProtocolStatus", self.tag()), || {
+        guard_quiet(&format!("{}::GetProtocolStatus", self.tag()), || {
             if p.is_null() {
                 return Err(E_POINTER.into());
             }
@@ -523,7 +535,7 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
     fn GetLastInputTime(&self) -> windows_core::Result<u64> {
         // Milliseconds since last input. Reported as 0 ("just now"): idle-session policies are not
         // applied to FastRDP sessions.
-        guard(&format!("{}::GetLastInputTime", self.tag()), || Ok(0))
+        guard_quiet(&format!("{}::GetLastInputTime", self.tag()), || Ok(0))
     }
 
     fn SetErrorInfo(&self, ulerror: u32) -> windows_core::Result<()> {
@@ -560,8 +572,11 @@ impl IWRdsProtocolConnection_Impl for Connection_Impl {
     }
 
     fn QueryProperty(&self, qt: &GUID, nin: u32, nout: u32, _pin: *const WTS_PROPERTY_VALUE, _pout: *mut WTS_PROPERTY_VALUE) -> windows_core::Result<()> {
-        guard(&format!("{}::QueryProperty", self.tag()), || {
-            logi!("{}::QueryProperty type={} in={nin} out={nout} -> E_NOTIMPL", self.tag(), guid_str(qt));
+        guard_quiet(&format!("{}::QueryProperty", self.tag()), || {
+            let t = guid_str(qt);
+            if self.state.lock().unwrap().logged_properties.insert(t.clone()) {
+                logi!("{}::QueryProperty type={t} in={nin} out={nout} -> E_NOTIMPL (logged once per type)", self.tag());
+            }
             Err(E_NOTIMPL.into())
         })
     }

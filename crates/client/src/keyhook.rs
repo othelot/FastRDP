@@ -82,22 +82,14 @@ pub fn install(hwnd: isize) {
     let spawned = std::thread::Builder::new().name("fastrdp-keyhook".into()).spawn(move || {
         use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, SetTimer, TranslateMessage, WM_TIMER};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, TranslateMessage};
         // SAFETY: hook + message loop owned by this thread for the process lifetime.
         unsafe {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
             let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), GetModuleHandleW(std::ptr::null()), 0);
             crate::log::line(&format!("keyhook: installed={}, raw keyboard registration removed={raw_removed}", !hook.is_null()));
-            // write the trace to the log every second (never from inside the hook callback)
-            SetTimer(std::ptr::null_mut(), 0, 1000, None);
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-                if msg.message == WM_TIMER {
-                    for t in trace() {
-                        crate::log::line(&format!("keyhook trace: {t}"));
-                    }
-                    continue;
-                }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -167,40 +159,12 @@ fn decide(down: &mut BTreeSet<(u16, bool)>, k: &KBDLLHOOKSTRUCT) -> Option<(u16,
     Some((sc.0, sc.1, !up))
 }
 
-/// Combination keys seen by the hook (only while a modifier is held - never plain typing),
-/// written to the log by the hook thread.
-static TRACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static MODS: AtomicU32 = AtomicU32::new(0);
-/// keys sent to the session, keys left local, send failures
+/// Counts only (keys sent to the session, left local, send failures) - which keys were pressed is
+/// never recorded anywhere.
 static STATS: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
-
-pub fn trace() -> Vec<String> {
-    std::mem::take(&mut *TRACE.lock().unwrap())
-}
 
 pub fn stats() -> (u32, u32, u32) {
     (STATS[0].load(Relaxed), STATS[1].load(Relaxed), STATS[2].load(Relaxed))
-}
-
-fn record(k: &KBDLLHOOKSTRUCT, what: &str) {
-    let is_mod = matches!(k.vkCode, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5);
-    let up = k.flags & LLKHF_UP != 0;
-    if is_mod {
-        let bit = 1u32 << (k.vkCode & 31);
-        if up {
-            MODS.fetch_and(!bit, Relaxed);
-        } else {
-            MODS.fetch_or(bit, Relaxed);
-        }
-    }
-    if !is_mod && MODS.load(Relaxed) == 0 {
-        return; // plain typing: not recorded
-    }
-    if let Ok(mut t) = TRACE.try_lock()
-        && t.len() < 300
-    {
-        t.push(format!("{} vk {:#04x} {} -> {what}", k.time, k.vkCode, if up { "up" } else { "down" }));
-    }
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -222,16 +186,6 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         unsafe { GetWindowThreadProcessId(fg, &mut pid) };
         let ours = pid == std::process::id() && !focus.is_null() && focus == s.hwnd;
         if !s.enabled || !ours {
-            record(
-                k,
-                if !s.enabled {
-                    "local (not on the remote screen / option off)"
-                } else if pid != std::process::id() {
-                    "local (foreground is another program)"
-                } else {
-                    "local (focus not on the window)"
-                },
-            );
             if !s.down.is_empty() {
                 release_all(&mut s);
             }
@@ -239,11 +193,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
         let st = &mut *s;
         let Some((scancode, extended, down)) = decide(&mut st.down, k) else {
-            record(k, "local (kept local)");
             return false;
         };
         let ok = st.input.as_ref().is_some_and(|i| i.send(InputCmd::Event(InputEvent::Key { scancode, extended, down })).is_ok());
-        record(k, if ok { "session" } else { "session (send failed)" });
         STATS[if ok { 0 } else { 2 }].fetch_add(1, Relaxed);
         true
     });

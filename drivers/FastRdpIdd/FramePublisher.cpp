@@ -21,10 +21,24 @@ FramePublisher& FramePublisher::Instance()
 
 FramePublisher::~FramePublisher()
 {
+    // Static destructor = DLL unload under the loader lock while the process exits: never call into
+    // the GPU driver here (see ReleaseGpu). Normally already released; otherwise leaked on purpose.
+    m_Staging.Detach();
+    m_StagingDevice = nullptr;
     if (m_pBase) UnmapViewOfFile(m_pBase);
     if (m_hSection) CloseHandle(m_hSection);
     if (m_hEvent) CloseHandle(m_hEvent);
     if (m_hCtlEvent) CloseHandle(m_hCtlEvent);
+}
+
+void FramePublisher::ReleaseGpu(ID3D11Device* dev)
+{
+    std::lock_guard<std::mutex> g(m_lock);
+    if (m_Staging && (dev == nullptr || m_StagingDevice == dev)) {
+        m_Staging.Reset();
+        m_StagingDevice = nullptr;
+        m_StagingW = m_StagingH = 0;
+    }
 }
 
 bool FramePublisher::ReadControl(FastRdpShmControl& out)

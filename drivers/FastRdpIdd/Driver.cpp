@@ -460,6 +460,8 @@ void SwapChainProcessor::Run()
     HANDLE AvTaskHandle = AvSetMmThreadCharacteristicsW(L"Distribution", &AvTask);
     bool lost = RunCore();
     SetEvent(m_hCursorStop.Get()); // the hardware-cursor setup belongs to this swap-chain
+    // GPU objects made on this swap-chain's device go now, on this thread (see FramePublisher::ReleaseGpu)
+    FramePublisher::Instance().ReleaseGpu(m_Device->Device.Get());
     if (lost && WaitForSingleObject(m_hTerminateEvent.Get(), 0) == WAIT_OBJECT_0) {
         // IddCx is already unassigning this swap-chain (e.g. ACCESS_LOST during re-assignment): it owns it.
         lost = false;

@@ -2,7 +2,7 @@
 #
 #   install / update : irm https://fastrdp.dev | iex
 #   uninstall        : & ([scriptblock]::Create((irm https://fastrdp.dev))) -Uninstall
-#   options          : -Yes (no questions)  -AutoUpdate On|Off  -Purge (uninstall: also server key, logs)
+#   options          : -Yes (no questions)  -AutoUpdate On|Off  -AllowPublicNetwork  -Purge (uninstall: also server key, logs)
 #
 # Source and release files: https://github.com/othelot/fastrdp
 # This file is a template: tools/New-FastRdpRelease.ps1 fills in the version and the package hash.
@@ -10,11 +10,13 @@ param(
     [switch]$Uninstall,
     [switch]$Yes,
     [switch]$Purge,
-    [ValidateSet('Keep', 'On', 'Off')][string]$AutoUpdate = 'Keep'
+    [ValidateSet('Keep', 'On', 'Off')][string]$AutoUpdate = 'Keep',
+    # also accept connections on networks Windows classifies as Public
+    [switch]$AllowPublicNetwork
 )
 
 function Invoke-FastRdpSetup {
-    param([switch]$Uninstall, [switch]$Yes, [switch]$Purge, [string]$AutoUpdate)
+    param([switch]$Uninstall, [switch]$Yes, [switch]$Purge, [string]$AutoUpdate, [switch]$AllowPublicNetwork)
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell downloads are very slow with a progress bar
 
@@ -46,6 +48,7 @@ function Invoke-FastRdpSetup {
         if ($Uninstall) { $cmd += ' -Uninstall' }
         if ($Yes) { $cmd += ' -Yes' }
         if ($Purge) { $cmd += ' -Purge' }
+        if ($AllowPublicNetwork) { $cmd += ' -AllowPublicNetwork' }
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
         Write-Host 'Administrator rights are needed - opening an elevated PowerShell window ...'
         Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -NoExit -EncodedCommand $enc"
@@ -100,12 +103,22 @@ Everything is removed again with -Uninstall.
 
 '@
         Confirm-Step 'Install FastRDP?'
+        $fw = @{}
+        $public = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { "$($_.NetworkCategory)" -eq 'Public' })
+        if ($AllowPublicNetwork) { $fw.FirewallProfile = @('Private', 'Public') }
+        elseif ($public -and -not $Yes) {
+            Write-Warning "This computer is connected to a network Windows treats as Public: $(($public | ForEach-Object { "'$($_.Name)' ($($_.InterfaceAlias))" }) -join ', ')."
+            Write-Host '  FastRDP is only reachable on Private networks unless you allow Public ones.'
+            Write-Host '  Better for a home/office network: Settings > Network & internet > (network) > Private network.'
+            $a = Read-Host 'Allow FastRDP on Public networks too? [y/N]'
+            if ($a -match '^(y|yes)$') { $fw.FirewallProfile = @('Private', 'Public') }
+        }
         $logDir = Join-Path $env:ProgramData 'FastRDP\logs'
         New-Item -ItemType Directory -Force $logDir | Out-Null
         Start-Transcript -Path (Join-Path $logDir 'setup.log') -Append | Out-Null
         try {
             $pkg = Get-Package
-            & (Join-Path $pkg 'scripts\Install-FastRdp.ps1') -PackageDir $pkg -AutoUpdate $AutoUpdate
+            & (Join-Path $pkg 'scripts\Install-FastRdp.ps1') -PackageDir $pkg -AutoUpdate $AutoUpdate @fw
             $fp = Get-Content (Join-Path $env:ProgramData 'FastRDP\server\cert.sha256') -ErrorAction SilentlyContinue
             Write-Host ''
             Write-Host "FastRDP $version installed." -ForegroundColor Green
@@ -120,4 +133,4 @@ Everything is removed again with -Uninstall.
     }
 }
 
-Invoke-FastRdpSetup -Uninstall:$Uninstall -Yes:$Yes -Purge:$Purge -AutoUpdate $AutoUpdate
+Invoke-FastRdpSetup -Uninstall:$Uninstall -Yes:$Yes -Purge:$Purge -AutoUpdate $AutoUpdate -AllowPublicNetwork:$AllowPublicNetwork

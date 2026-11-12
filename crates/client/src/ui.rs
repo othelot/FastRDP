@@ -1031,7 +1031,7 @@ mod tests {
         let r = update::Release { version: update::Version(99, 0, 0), tag: "v99.0.0".into(), files: Default::default() };
         let _ = update(&mut app, Message::UpdateFound(Some(r)));
         let mut ui = simulator(view(&app));
-        assert!(ui.find("FastRDP 99.0.0 is available (this is 0.1.0).").is_ok());
+        assert!(ui.find(format!("FastRDP 99.0.0 is available (this is {}).", update::CURRENT).as_str()).is_ok());
         ui.click("Update and restart").unwrap();
         assert!(ui.into_messages().any(|m| matches!(m, Message::UpdateClient)));
     }

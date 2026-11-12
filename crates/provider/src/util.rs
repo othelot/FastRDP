@@ -86,6 +86,24 @@ pub fn guard<T>(what: &str, f: impl FnOnce() -> windows_core::Result<T>) -> wind
     }
 }
 
+/// Like `guard`, for methods TermService polls many times a second (GetProtocolStatus,
+/// GetLastInputTime, QueryProperty): only failures other than E_NOTIMPL and panics are logged.
+pub fn guard_quiet<T>(what: &str, f: impl FnOnce() -> windows_core::Result<T>) -> windows_core::Result<T> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(r) => {
+            let hr = hr_of(&r);
+            if hr != 0 && hr != E_NOTIMPL.0 as u32 {
+                crate::log::write("WARN ", &format!("{what} -> hr=0x{hr:08X}"));
+            }
+            r
+        }
+        Err(_) => {
+            loge!("{what} -> PANIC caught, returning E_UNEXPECTED");
+            Err(E_UNEXPECTED.into())
+        }
+    }
+}
+
 pub fn reg_dword(root: HKEY, sub: &str, name: &str) -> Option<u32> {
     let (sub, name) = (wide(sub), wide(name));
     let mut v: u32 = 0;

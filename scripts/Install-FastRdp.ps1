@@ -17,6 +17,8 @@
 param(
     [Parameter(Mandatory)][string]$PackageDir,
     [ValidateSet('Keep', 'On', 'Off')][string]$AutoUpdate = 'Keep',
+    # firewall profiles for UDP 33890 (default: keep the existing rule's, else Private)
+    [ValidateSet('Domain', 'Private', 'Public', 'Any')][string[]]$FirewallProfile,
     # started by fastrdp-update.exe (the update task must not be re-registered while it runs)
     [switch]$Unattended
 )
@@ -37,7 +39,9 @@ Write-Host "Installing FastRDP $version$(if ($previous) { " (installed: $previou
 
 # 1 + 2
 & "$PSScriptRoot\Install-FastRdpIdd.ps1" -PackageDir (Join-Path $PackageDir 'driver\FastRdpIdd') -CertFile (Join-Path $PackageDir 'driver\FastRdpDriverPublisher.cer')
-& "$PSScriptRoot\Install-FastRdpServer.ps1" -BinDir (Join-Path $PackageDir 'bin')
+$fw = @{}
+if ($FirewallProfile) { $fw.FirewallProfile = $FirewallProfile }
+& "$PSScriptRoot\Install-FastRdpServer.ps1" -BinDir (Join-Path $PackageDir 'bin') @fw
 
 # 3
 $packages = Join-Path $FastRdp.InstallDir 'packages'
