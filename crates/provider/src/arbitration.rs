@@ -15,14 +15,20 @@
 //! that size. (An earlier version answered the first call with S_OK, termsrv then used an
 //! unallocated array and terminated.)
 //!
+//! Sessions created by RDP cannot be taken over at all: lsm.dll checks the same compatibility again
+//! when it applies the connection to the session (`CSessionReconnectController::
+//! TryApplyTerminalToSession` -> ERROR_CTX_SESSION_INCOMPATIBLE, "the target session is
+//! incompatible with the current session"). They are therefore never named here (client protocol
+//! type RDP); for them Windows' default arbitration applies.
+//!
 //! The user's sessions are listed when the connection is accepted, on the provider's own thread
 //! (no RDS API calls inside TermService callbacks). The answer is only given when the token of the
 //! user who actually logged on has the same SID; otherwise Windows' default arbitration applies.
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{GetLengthSid, GetTokenInformation, LookupAccountNameW, SID_NAME_USE, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::RemoteDesktop::{
-    WTS_INFO_CLASS, WTS_SESSION_INFOW, WTSActive, WTSDisconnected, WTSDomainName, WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW,
-    WTSUserName,
+    WTS_INFO_CLASS, WTS_SESSION_INFOW, WTSActive, WTSClientProtocolType, WTSDisconnected, WTSDomainName, WTSEnumerateSessionsW, WTSFreeMemory,
+    WTSQuerySessionInformationW, WTSUserName,
 };
 
 use crate::util::wide;
@@ -31,6 +37,9 @@ use crate::util::wide;
 pub struct UserSession {
     pub id: u32,
     pub active: bool,
+    /// created by Microsoft's RDP (client protocol type RDP): Windows does not let another
+    /// protocol reconnect to it
+    pub rdp: bool,
 }
 
 /// The connecting account and its sessions when the connection was accepted.
@@ -89,6 +98,21 @@ fn session_string(id: u32, class: WTS_INFO_CLASS) -> String {
     }
 }
 
+/// WTS_PROTOCOL_TYPE of the session's (last) client: 0 console (also FastRDP), 2 RDP.
+fn client_protocol_type(id: u32) -> Option<u16> {
+    let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let mut bytes = 0u32;
+    // SAFETY: WTS allocates the buffer (a USHORT); freed with WTSFreeMemory.
+    unsafe {
+        if WTSQuerySessionInformationW(std::ptr::null_mut(), id, WTSClientProtocolType, &mut buf, &mut bytes) == 0 || buf.is_null() {
+            return None;
+        }
+        let v = (bytes >= 2).then(|| *(buf as *const u16));
+        WTSFreeMemory(buf.cast());
+        v
+    }
+}
+
 /// Active and disconnected sessions whose user is `sid`.
 pub fn sessions_of(sid: &[u8]) -> Vec<UserSession> {
     let mut info: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
@@ -108,7 +132,7 @@ pub fn sessions_of(sid: &[u8]) -> Vec<UserSession> {
             let user = session_string(*id, WTSUserName);
             !user.is_empty() && account_sid(&session_string(*id, WTSDomainName), &user).as_deref() == Some(sid)
         })
-        .map(|(id, state)| UserSession { id, active: state == WTSActive })
+        .map(|(id, state)| UserSession { id, active: state == WTSActive, rdp: client_protocol_type(id) == Some(2) })
         .collect()
 }
 
@@ -140,7 +164,7 @@ pub fn token_sid(token: HANDLE) -> Option<Vec<u8>> {
 /// Windows then disconnects - like RDP), else the oldest disconnected one; never the session that
 /// was just created for this connection.
 pub fn pick(sessions: &[UserSession], new_session: u32) -> Option<u32> {
-    let mut c: Vec<&UserSession> = sessions.iter().filter(|s| s.id != new_session).collect();
+    let mut c: Vec<&UserSession> = sessions.iter().filter(|s| s.id != new_session && !s.rdp).collect();
     c.sort_by_key(|s| (!s.active, s.id));
     c.first().map(|s| s.id)
 }
@@ -151,8 +175,11 @@ mod tests {
 
     #[test]
     fn active_first_then_oldest_disconnected() {
-        let s = |id, active| UserSession { id, active };
+        let s = |id, active| UserSession { id, active, rdp: false };
         assert_eq!(pick(&[s(3, false), s(2, true)], 6), Some(2));
+        let rdp = UserSession { id: 2, active: true, rdp: true };
+        assert_eq!(pick(&[rdp, s(3, false)], 6), Some(3), "never a session made by RDP");
+        assert_eq!(pick(&[rdp], 6), None);
         assert_eq!(pick(&[s(5, false), s(3, false)], 6), Some(3));
         assert_eq!(pick(&[s(6, true)], 6), None, "never the new session itself");
         assert_eq!(pick(&[], 6), None);
