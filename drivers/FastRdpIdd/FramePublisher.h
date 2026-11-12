@@ -1,5 +1,5 @@
 // FramePublisher.h - copies swap-chain frames into the per-session shared memory (FastRdpShm.h).
-// CPU path for machines without a usable hardware encoder (WARP / x264). A GPU shared-texture path
+// CPU path for machines without a usable hardware encoder (WARP / software encoder). A GPU shared-texture path
 // (for a hardware encoder) is planned and will sit next to this one.
 #pragma once
 #include "Driver.h"

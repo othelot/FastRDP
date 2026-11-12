@@ -1108,7 +1108,6 @@ dependencies = [
 name = "encoder"
 version = "0.1.5"
 dependencies = [
- "cc",
  "clap",
  "openh264",
  "serde",

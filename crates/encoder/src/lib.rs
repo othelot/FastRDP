@@ -1,22 +1,27 @@
-//! FastRDP video encoding with a user-selected encoder and a **mandatory x264 fallback**.
+//! FastRDP video encoding with a user-selected encoder and a **mandatory OpenH264 fallback**.
 //!
 //! Policy (user requirement):
-//! * the encoder is user-configurable (`encoder.toml`), **default = x264**;
-//! * if the configured encoder is missing (no GPU/driver/DLL) or fails to initialise -> x264;
+//! * the encoder is user-configurable (`encoder.toml`), **default = OpenH264** (built from source,
+//!   BSD); NVENC uses the NVIDIA GPU;
+//! * if the configured encoder is missing (no GPU/driver/DLL) or fails to initialise -> OpenH264;
 //! * if it fails at runtime (device removed, driver reset, session limit, encode error) -> switch to
-//!   x264 immediately, re-encode the same frame as an IDR so the stream stays decodable;
+//!   OpenH264 immediately, re-encode the same frame as an IDR so the stream stays decodable;
 //! * optionally re-try the configured encoder every `retry_requested_secs`.
 //!
 //! Every switch is recorded as a [`FallbackEvent`] for logs/telemetry/client notification.
 
 pub mod backends;
 pub mod convert;
+pub mod nvenc;
 pub mod settings;
 
 use std::fmt;
 use std::time::{Duration, Instant};
 
 pub use settings::{EncoderKind, EncoderSettings};
+
+/// The encoder every other one falls back to (software, always available).
+pub const FALLBACK: EncoderKind = EncoderKind::OpenH264;
 
 /// One BGRA frame (e.g. a mapped IddCx swap-chain surface).
 pub struct Frame<'a> {
@@ -86,8 +91,8 @@ pub struct AdaptiveEncoder {
 }
 
 impl AdaptiveEncoder {
-    /// Creates the configured encoder; falls back to x264 when it is missing or fails.
-    /// Errors only if x264 itself cannot be created.
+    /// Creates the configured encoder; falls back to OpenH264 when it is missing or fails.
+    /// Errors only if OpenH264 itself cannot be created.
     pub fn new(settings: EncoderSettings, width: u32, height: u32) -> Result<Self, EncodeError> {
         settings.validate().map_err(EncodeError::InvalidInput)?;
         let mut events = Vec::new();
@@ -105,9 +110,9 @@ impl AdaptiveEncoder {
     ) -> Result<Box<dyn backends::Backend>, EncodeError> {
         match backends::create(s.encoder, s, w, h) {
             Ok(b) => Ok(b),
-            Err(e) if s.encoder != EncoderKind::X264 && !matches!(e, EncodeError::InvalidInput(_)) => {
-                events.push(FallbackEvent { phase, from: s.encoder, to: EncoderKind::X264, reason: e.to_string() });
-                backends::create(EncoderKind::X264, s, w, h)
+            Err(e) if s.encoder != FALLBACK && !matches!(e, EncodeError::InvalidInput(_)) => {
+                events.push(FallbackEvent { phase, from: s.encoder, to: FALLBACK, reason: e.to_string() });
+                backends::create(FALLBACK, s, w, h)
             }
             Err(e) => Err(e),
         }
@@ -188,10 +193,10 @@ impl AdaptiveEncoder {
                 Ok(p)
             }
             Err(e @ EncodeError::InvalidInput(_)) => Err(e),
-            Err(e) if self.active.kind() != EncoderKind::X264 => {
+            Err(e) if self.active.kind() != FALLBACK => {
                 let from = self.active.kind();
-                self.active = backends::create(EncoderKind::X264, &self.settings, self.width, self.height)?;
-                self.events.push(FallbackEvent { phase: FallbackPhase::Runtime, from, to: EncoderKind::X264, reason: e.to_string() });
+                self.active = backends::create(FALLBACK, &self.settings, self.width, self.height)?;
+                self.events.push(FallbackEvent { phase: FallbackPhase::Runtime, from, to: FALLBACK, reason: e.to_string() });
                 self.fell_back_at = Some(Instant::now());
                 // Same frame again, as IDR: the decoder must not depend on the dead encoder's references.
                 let p = self.active.encode(f, true)?;
@@ -199,13 +204,13 @@ impl AdaptiveEncoder {
                 Ok(p)
             }
             Err(e) => {
-                // x264 itself failed: recreate it once, then give up.
-                self.active = backends::create(EncoderKind::X264, &self.settings, self.width, self.height)?;
+                // the fallback itself failed: recreate it once, then give up.
+                self.active = backends::create(FALLBACK, &self.settings, self.width, self.height)?;
                 self.events.push(FallbackEvent {
                     phase: FallbackPhase::Runtime,
-                    from: EncoderKind::X264,
-                    to: EncoderKind::X264,
-                    reason: format!("x264 restarted after: {e}"),
+                    from: FALLBACK,
+                    to: FALLBACK,
+                    reason: format!("{FALLBACK} restarted after: {e}"),
                 });
                 self.active.encode(f, true)
             }
@@ -222,7 +227,7 @@ impl AdaptiveEncoder {
         if let Ok(b) = backends::create(self.settings.encoder, &self.settings, self.width, self.height) {
             self.events.push(FallbackEvent {
                 phase: FallbackPhase::Runtime,
-                from: EncoderKind::X264,
+                from: FALLBACK,
                 to: b.kind(),
                 reason: "configured encoder available again".into(),
             });
@@ -256,56 +261,66 @@ mod tests {
     }
 
     #[test]
-    fn default_is_x264_and_first_packet_is_idr() {
+    fn default_is_openh264_and_first_packet_is_idr() {
         let mut e = AdaptiveEncoder::new(EncoderSettings::default(), 320, 240).unwrap();
-        assert_eq!(e.active(), EncoderKind::X264);
-        let p = e.encode(&frame(&pattern(320, 240, 0), 320, 240, 0)).unwrap().expect("zerolatency emits immediately");
+        assert_eq!(e.active(), EncoderKind::OpenH264);
+        let p = e.encode(&frame(&pattern(320, 240, 0), 320, 240, 0)).unwrap().expect("emits immediately");
         assert!(p.keyframe);
         assert!(e.take_events().is_empty());
     }
 
     #[test]
-    fn missing_hw_encoder_falls_back_to_x264_at_init() {
-        for kind in [EncoderKind::Nvenc, EncoderKind::MediaFoundation] {
-            let s = EncoderSettings { encoder: kind, ..Default::default() };
-            let mut e = AdaptiveEncoder::new(s, 320, 240).unwrap();
-            assert_eq!(e.active(), EncoderKind::X264);
-            assert!(e.is_fallback());
-            let ev = e.take_events();
+    fn missing_hw_encoder_falls_back_at_init() {
+        let s = EncoderSettings { encoder: EncoderKind::MediaFoundation, ..Default::default() };
+        let mut e = AdaptiveEncoder::new(s, 320, 240).unwrap();
+        assert_eq!(e.active(), FALLBACK);
+        assert!(e.is_fallback());
+        let ev = e.take_events();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].from, EncoderKind::MediaFoundation);
+        assert_eq!(ev[0].to, FALLBACK);
+    }
+
+    /// With an NVIDIA GPU: NVENC encodes, first packet IDR with SPS/PPS, bitrate changes in place.
+    /// Without (or not Windows): OpenH264 with one fallback event. Either way the stream starts.
+    #[test]
+    fn nvenc_or_fallback() {
+        let s = EncoderSettings { encoder: EncoderKind::Nvenc, retry_requested_secs: 0, ..Default::default() };
+        let mut e = AdaptiveEncoder::new(s, 640, 360).unwrap();
+        let ev = e.take_events();
+        eprintln!("nvenc test: active {} ({}), events {ev:?}", e.active(), e.describe());
+        let p = e.encode(&frame(&pattern(640, 360, 0), 640, 360, 0)).unwrap().expect("first frame");
+        assert!(p.keyframe);
+        if e.active() == EncoderKind::Nvenc {
+            assert!(ev.is_empty());
+            let has_sps = p.data.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 7);
+            assert!(has_sps, "SPS (NAL type 7) in the IDR");
+            for t in 1..10 {
+                let p = e.encode(&frame(&pattern(640, 360, t), 640, 360, t as i64)).unwrap().expect("one packet per frame");
+                assert_eq!(p.encoder, EncoderKind::Nvenc);
+            }
+            e.set_bitrate(5000).unwrap();
+            assert_eq!(e.active(), EncoderKind::Nvenc, "bitrate changed in place");
+            assert!(e.describe().ends_with("5000 kbps"));
+        } else {
             assert_eq!(ev.len(), 1);
-            assert_eq!(ev[0].from, kind);
-            assert_eq!(ev[0].to, EncoderKind::X264);
+            assert_eq!(ev[0].from, EncoderKind::Nvenc);
         }
     }
 
     #[test]
-    fn openh264_runtime_failure_falls_back_to_x264_with_idr() {
-        let s = EncoderSettings { encoder: EncoderKind::OpenH264, retry_requested_secs: 0, ..Default::default() };
-        let mut e = AdaptiveEncoder::new(s, 320, 240).unwrap();
-        assert_eq!(e.active(), EncoderKind::OpenH264);
+    fn fallback_encoder_failure_restarts_it_with_an_idr() {
+        let mut e = AdaptiveEncoder::new(EncoderSettings { retry_requested_secs: 0, ..Default::default() }, 320, 240).unwrap();
         for t in 0..3 {
             e.encode(&frame(&pattern(320, 240, t), 320, 240, t as i64)).unwrap();
         }
         e.inject_runtime_failures(1);
         let p = e.encode(&frame(&pattern(320, 240, 9), 320, 240, 9)).unwrap().unwrap();
-        assert_eq!(p.encoder, EncoderKind::X264);
-        assert!(p.keyframe, "first x264 packet after fallback must be an IDR");
+        assert_eq!(p.encoder, FALLBACK);
+        assert!(p.keyframe, "first packet of the restarted encoder must be an IDR");
         let ev = e.take_events();
         assert!(matches!(ev[0].phase, FallbackPhase::Runtime));
-        assert_eq!(ev[0].from, EncoderKind::OpenH264);
-    }
-
-    #[test]
-    fn retry_returns_to_configured_encoder() {
-        let s = EncoderSettings { encoder: EncoderKind::OpenH264, retry_requested_secs: 1, ..Default::default() };
-        let mut e = AdaptiveEncoder::new(s, 160, 120).unwrap();
-        e.inject_runtime_failures(1);
-        e.encode(&frame(&pattern(160, 120, 0), 160, 120, 0)).unwrap();
-        assert_eq!(e.active(), EncoderKind::X264);
-        std::thread::sleep(Duration::from_millis(1100));
-        let p = e.encode(&frame(&pattern(160, 120, 1), 160, 120, 1)).unwrap().unwrap();
-        assert_eq!(e.active(), EncoderKind::OpenH264);
-        assert!(p.keyframe);
+        assert_eq!((ev[0].from, ev[0].to), (FALLBACK, FALLBACK));
     }
 
     #[test]

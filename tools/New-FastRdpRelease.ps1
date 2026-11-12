@@ -5,7 +5,7 @@
      (--remap-path-prefix; PDB file name only, /PDBALTPATH), drivers\Build-FastRdpIdd.ps1 (signs with
      the build user's FastRDP driver certificate)
   2. fastrdp-<version>-x64.zip: VERSION, bin\ (server, agent, updater, provider DLL), driver\ (signed
-     package + .cer), scripts\, README.md, LICENSE, THIRD-PARTY-NOTICES.txt, licenses\x264-GPL.txt
+     package + .cer), scripts\, README.md, LICENSE, THIRD-PARTY-NOTICES.txt
   3. fastrdp-client-<version>-x64.zip: fastrdp-client.exe, LICENSE, THIRD-PARTY-NOTICES.txt
   4. install.ps1 from web\install.ps1 with the version and the server package SHA-256
   5. SHA256SUMS.txt
@@ -49,16 +49,8 @@ $rel = Join-Path $root 'target\dist\release'
 $drv = Join-Path $root 'target\driver'
 
 # ---- third-party notices
-$vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Join-Path $env:USERPROFILE 'vcpkg' }
-$x264License = if ($env:FASTRDP_X264_DIR) { Join-Path $env:FASTRDP_X264_DIR 'share\x264\copyright' } else { Join-Path $vcpkg 'installed\x64-windows-static\share\x264\copyright' }
-if (-not (Test-Path $x264License)) { throw "x264 license text not found: $x264License" }
 $notices = @"
 FastRDP $version - third-party software
-
-x264 (statically linked into fastrdp-server.exe)
-  Copyright (C) x264 project. GNU General Public License v2 or later: licenses\x264-GPL.txt.
-  fastrdp-server.exe as distributed is therefore covered by the GPL. Source code of x264:
-  https://code.videolan.org/videolan/x264 ; source code of FastRDP: https://github.com/$repo
 
 OpenH264 (fastrdp-server.exe, fastrdp-client.exe)
   Copyright (c) 2013, Cisco Systems. BSD 2-Clause License. https://github.com/cisco/openh264
@@ -94,20 +86,19 @@ function New-Zip([string]$name, [scriptblock]$fill) {
 
 $serverZip = New-Zip "fastrdp-$version-x64" {
     param($d)
-    New-Item -ItemType Directory -Force "$d\bin", "$d\driver", "$d\scripts", "$d\licenses" | Out-Null
+    New-Item -ItemType Directory -Force "$d\bin", "$d\driver", "$d\scripts" | Out-Null
     Copy-Item "$rel\fastrdp-server.exe", "$rel\fastrdp-agent.exe", "$rel\fastrdp-update.exe", "$rel\fastrdp_provider.dll" "$d\bin"
     Set-Content "$d\VERSION" $version -NoNewline
     Copy-Item "$drv\FastRdpIdd" "$d\driver" -Recurse
     Copy-Item "$drv\FastRdpDriverPublisher.cer" "$d\driver"
     Copy-Item "$root\scripts\*.ps1" "$d\scripts"
     Copy-Item "$root\README.md", "$root\LICENSE" $d
-    Copy-Item $x264License "$d\licenses\x264-GPL.txt"
     Set-Content "$d\THIRD-PARTY-NOTICES.txt" $notices
 }
 $clientZip = New-Zip "fastrdp-client-$version-x64" {
     param($d)
     Copy-Item "$rel\fastrdp-client.exe", "$root\LICENSE" $d
-    Set-Content "$d\THIRD-PARTY-NOTICES.txt" ($notices -replace '(?s)x264 \(statically.*?FastRDP: https://github.com/\S+\s+', '')
+    Set-Content "$d\THIRD-PARTY-NOTICES.txt" $notices
 }
 
 # ---- install.ps1 (ASCII, no BOM: served as text and piped into iex)

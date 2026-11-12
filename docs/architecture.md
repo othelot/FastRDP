@@ -87,7 +87,7 @@ unidirectional streams, video as datagrams.
 ```
 Desktop Window Manager → IddCx swap chain (FastRdpIdd)
   → staging copy → Global\FastRDP_Frame_S<session>  (3-slot seqlock, BGRA, + event)
-  → fastrdp-server: BGRA → I420 → H.264 (x264 superfast/zerolatency by default)
+  → fastrdp-server: BGRA → I420 → H.264 (OpenH264 by default, multi-threaded slices; NVENC on NVIDIA GPUs takes BGRA)
   → transport: 28-byte header, ≤ 64 data shards per block, Reed-Solomon parity (GF(2^8))
   → QUIC datagrams → client: reassembly / FEC recovery → OpenH264 decode → wgpu shader
 ```
@@ -96,7 +96,7 @@ Desktop Window Manager → IddCx swap chain (FastRdpIdd)
 * Loss handling: the client reports loss once per second; the server raises the FEC ratio and lowers
   the bitrate (bitrate scales with resolution, recovers after a clean period). An incomplete frame
   makes the client wait for an IDR frame and request it.
-* `encoder.toml` selects the encoder; if it is missing or fails, x264 takes over and the client is
+* `encoder.toml` selects the encoder; if it is missing or fails, OpenH264 takes over and the client is
   told (`EncoderFallback` event).
 
 ### Shared memory (`frame-shm`, `drivers/FastRdpIdd/FastRdpShm.h`)

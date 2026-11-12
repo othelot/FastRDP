@@ -10,15 +10,27 @@ use encoder::{AdaptiveEncoder, EncoderKind, EncoderSettings, Frame};
 #[derive(Parser, Debug)]
 #[command(name = "encoder-bench", version, about = "Measure FastRDP encoders and verify the output decodes")]
 struct Cli {
-    /// Encoder to request (falls back to x264 like the server): x264, openh264, nvenc, mf
+    /// Encoder to request (falls back to OpenH264 like the server): openh264, nvenc, mf
     #[arg(long)]
     encoder: Option<EncoderKind>,
     /// encoder.toml to load (default: built-in defaults)
     #[arg(long)]
     config: Option<std::path::PathBuf>,
-    /// x264 preset override
+    /// OpenH264 complexity override: low, medium, high
+    #[arg(long)]
+    complexity: Option<String>,
+    /// OpenH264 threads override (0 = automatic, 1 = single)
+    #[arg(long)]
+    threads: Option<u16>,
+    /// NVENC preset override: p1 .. p7
     #[arg(long)]
     preset: Option<String>,
+    /// Frame rate the encoder is configured for
+    #[arg(long)]
+    fps: Option<u32>,
+    /// Target bitrate (kbps)
+    #[arg(long)]
+    bitrate_kbps: Option<u32>,
     /// Number of frames to encode
     #[arg(long, default_value_t = 600)]
     frames: usize,
@@ -108,8 +120,20 @@ fn main() {
     if let Some(e) = cli.encoder {
         s.encoder = e;
     }
+    if let Some(c) = cli.complexity.clone() {
+        s.openh264.complexity = c;
+    }
+    if let Some(t) = cli.threads {
+        s.openh264.threads = t;
+    }
     if let Some(p) = cli.preset.clone() {
-        s.x264.preset = p;
+        s.nvenc.preset = p;
+    }
+    if let Some(f) = cli.fps {
+        s.fps = f;
+    }
+    if let Some(b) = cli.bitrate_kbps {
+        s.bitrate_kbps = b;
     }
     let frames = cli.frames;
     let inject_at = cli.inject_failure_at;
@@ -128,9 +152,16 @@ fn main() {
     };
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
     println!("frames={frames} size={w}x{h} requested={} cpus={cpus}", s.encoder);
+    // the CPU colour conversion alone (part of every software-encoder frame below)
+    let mut yuv = encoder::convert::I420::new(w as usize, h as usize);
+    let t = Instant::now();
+    for _ in 0..100 {
+        encoder::convert::bgra_to_i420(&base, w as usize * 4, &mut yuv, 0);
+    }
+    println!("BGRA->I420 conversion alone: {:.2} ms", t.elapsed().as_secs_f64() * 1e3 / 100.0);
 
     let t0 = Instant::now();
-    let mut enc = AdaptiveEncoder::new(s.clone(), w, h).expect("encoder (x264 fallback also failed)");
+    let mut enc = AdaptiveEncoder::new(s.clone(), w, h).expect("encoder (OpenH264 fallback also failed)");
     println!("init {:.1} ms active={} ({})", t0.elapsed().as_secs_f64() * 1e3, enc.active(), enc.describe());
     for ev in enc.take_events() {
         println!("FALLBACK {:?}: {} -> {} : {}", ev.phase, ev.from, ev.to, ev.reason);

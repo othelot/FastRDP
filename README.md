@@ -31,7 +31,7 @@ built-in `RDP-Tcp` listener is never modified. Every install step has an uninsta
 |---|---|
 | Sessions | Independent remote sessions created by TermService; reconnects to the user's session and takes it over from the console, another FastRDP client or Microsoft's Remote Desktop client, like RDP (Windows 11 Pro allows one active user) |
 | Display | Remote Indirect Display Driver (IddCx 1.10); any resolution up to 3840×2160, DPI scale, resize the remote desktop with the client window |
-| Video | Damage-driven H.264 (x264 by default, OpenH264 optional) over QUIC datagrams with Reed-Solomon FEC, loss feedback and adaptive bitrate |
+| Video | Damage-driven H.264 (OpenH264 by default, NVENC on NVIDIA GPUs) over QUIC datagrams with Reed-Solomon FEC, loss feedback and adaptive bitrate |
 | Input | Keyboard and mouse through the same session input devices RDP uses, so the lock screen, UAC and Ctrl+Alt+Del work (Ctrl+Alt+End sends Ctrl+Alt+Del); SendInput agent as fallback |
 | Keyboard | Windows key combinations (Alt+Tab, Win, …) go to the remote session — always, only in full screen, or never |
 | Pointer | Remote pointer shapes; on Windows the client shows them as the real OS cursor (no pointer lag) |
@@ -67,7 +67,7 @@ crates/
   server/      fastrdp-server: QUIC endpoint, session relay, encoding, input and channel relay
   client/      fastrdp-client: iced GUI (+ --headless)
   agent/       fastrdp-agent: per-session helper (rdpclip, SendInput fallback)
-  encoder/     H.264 encoders with x264 fallback, encoder-bench
+  encoder/     H.264 encoders (OpenH264, NVENC) with OpenH264 fallback, encoder-bench
   transport/   video datagrams: fragmentation, Reed-Solomon FEC, reassembly
   frame-shm/   shared memory between the display driver and the server
   update/      fastrdp-update: signed release manifest, verified downloads, update task
@@ -86,9 +86,6 @@ docs/
 Requirements (build machine, Windows x64):
 
 * Rust (stable, edition 2024) with the MSVC toolchain
-* libx264, static: `vcpkg install x264:x64-windows-static` with [vcpkg](https://github.com/microsoft/vcpkg)
-  cloned to `%USERPROFILE%\vcpkg` (elsewhere: set `VCPKG_ROOT`, or `FASTRDP_X264_DIR` to a directory
-  containing `include\x264.h` and `lib\libx264.lib`)
 * For the display driver: Visual Studio 2026 with the Windows Driver Kit 10.0.28000
 
 ```powershell
@@ -179,7 +176,7 @@ Run `fastrdp-client.exe`, enter `host` or `host:port` and the user name (`name`,
 
 | Where | What |
 |---|---|
-| `%ProgramData%\FastRDP\encoder.toml` | encoder (`x264` / `openh264`), bitrate, x264 preset — see `crates/encoder/src/settings.rs` |
+| `%ProgramData%\FastRDP\encoder.toml` | encoder (`openh264` / `nvenc`), bitrate, OpenH264 mode / NVENC preset — see `crates/encoder/src/settings.rs` |
 | `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\FastRDP` | `FastRdpVirtualChannels` (1), `FastRdpDeviceInput` (1), `FastRdpIddHardwareId` |
 | `fastrdp-server` service arguments | `--bind 0.0.0.0:33890`, `--fec`, `--listener` |
 | Logs | `%ProgramData%\FastRDP\logs\` (provider, server, driver) |
@@ -199,6 +196,6 @@ Run `fastrdp-client.exe`, enter `host` or `host:port` and the user name (`name`,
 
 FastRDP's source code is released under the [MIT License](LICENSE).
 
-The encoder statically links **x264**, which is licensed under the GNU GPL v2 or later. Binaries
-built with x264 (every `fastrdp-server.exe`) are therefore covered by the GPL when distributed.
-OpenH264 is BSD-2-Clause. Other dependencies are listed in `Cargo.lock` with their own licenses.
+OpenH264 (built from source into the server and client) is BSD-2-Clause; the NVENC backend loads
+NVIDIA's driver DLLs at run time and links nothing. Other dependencies are listed in `Cargo.lock`
+with their own licenses.

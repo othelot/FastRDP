@@ -543,7 +543,7 @@ pub struct StreamInfo {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// fastrdp-encoder kind: 0 x264, 1 openh264, 2 nvenc, 3 mf
+    /// fastrdp-encoder kind: 1 openh264, 2 nvenc, 3 mf (0 = x264, servers before 0.1.6)
     pub encoder: u8,
     pub fallback: bool,
     pub description: String,
@@ -994,7 +994,7 @@ mod tests {
             os_info: "10.0.26300".into(),
         }));
         roundtrip(Message::Event(EventMsg { event: Event::SessionId as u32, value: 3, text: String::new() }));
-        roundtrip(Message::StreamInfo(StreamInfo { width: 1920, height: 1080, fps: 60, encoder: 0, fallback: true, description: "x264".into() }));
+        roundtrip(Message::StreamInfo(StreamInfo { width: 1920, height: 1080, fps: 60, encoder: 1, fallback: true, description: "openh264".into() }));
         roundtrip(Message::Feedback(Feedback {
             frames_complete: 59,
             frames_lost: 1,

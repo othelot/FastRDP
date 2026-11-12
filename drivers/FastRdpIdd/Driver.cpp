@@ -480,7 +480,7 @@ bool SwapChainProcessor::RunCore()
             firstLogged = true;
         }
 
-        // CPU path: publish into the per-session shared memory for fastrdp-server (x264/OpenH264).
+        // CPU path: publish into the per-session shared memory for fastrdp-server (OpenH264 / NVENC).
         // Future: GPU shared texture -> hardware encoder (no CPU copy) next to this.
         if (publisherReady) {
             HRESULT ph = FramePublisher::Instance().Publish(m_Device->Device.Get(), m_Device->DeviceContext.Get(),

@@ -1,5 +1,5 @@
 //! BGRA (IddCx swap-chain format B8G8R8A8) -> I420, BT.709 limited range, row-parallel.
-//! CPU path used by the software encoders (x264 / OpenH264). Hardware encoders take BGRA directly.
+//! CPU path used by the software encoder (OpenH264). Hardware encoders take BGRA directly.
 
 /// Planar I420 buffer with tight strides.
 pub struct I420 {

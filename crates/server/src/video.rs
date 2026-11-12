@@ -1,5 +1,5 @@
 //! Per-client video loop (blocking thread): session frame shared memory -> AdaptiveEncoder
-//! (configured encoder, x264 fallback) -> FEC packetizer -> QUIC datagrams.
+//! (configured encoder, OpenH264 fallback) -> FEC packetizer -> QUIC datagrams.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -35,7 +35,6 @@ pub struct VideoParams {
 
 pub fn encoder_code(k: EncoderKind) -> u8 {
     match k {
-        EncoderKind::X264 => 0,
         EncoderKind::OpenH264 => 1,
         EncoderKind::Nvenc => 2,
         EncoderKind::MediaFoundation => 3,
@@ -189,7 +188,7 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
     let settings = match EncoderSettings::load(&EncoderSettings::default_path()) {
         Ok(s) => s,
         Err(e) => {
-            warn!("{tag}: encoder.toml invalid ({e}) - using defaults (x264)");
+            warn!("{tag}: encoder.toml invalid ({e}) - using defaults (OpenH264)");
             EncoderSettings::default()
         }
     };
@@ -272,7 +271,7 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
                     enc = Some(e);
                 }
                 Err(e) => {
-                    warn!("{tag}: no encoder (x264 fallback failed too): {e}");
+                    warn!("{tag}: no encoder (OpenH264 fallback failed too): {e}");
                     return;
                 }
             }
