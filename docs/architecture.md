@@ -86,8 +86,9 @@ unidirectional streams, video as datagrams.
 
 ```
 Desktop Window Manager → IddCx swap chain (FastRdpIdd)
-  → staging copy → Global\FastRDP_Frame_S<session>  (3-slot seqlock, BGRA, + event)
-  → fastrdp-server: BGRA → I420 → H.264 (OpenH264 by default, multi-threaded slices; NVENC on NVIDIA GPUs takes BGRA)
+  → compute shader BGRA → I420 (ToI420.hlsl, render GPU) → staging copy
+  → Global\FastRDP_Frame_S<session>  (3-slot seqlock, I420 - or BGRA where the GPU cannot convert - + event)
+  → fastrdp-server: H.264 (OpenH264 by default, multi-threaded slices; NVENC on NVIDIA GPUs)
   → transport: 28-byte header, ≤ 64 data shards per block, Reed-Solomon parity (GF(2^8))
   → QUIC datagrams → client: reassembly / FEC recovery → OpenH264 decode → wgpu shader
 ```
@@ -103,7 +104,8 @@ Desktop Window Manager → IddCx swap chain (FastRdpIdd)
 
 `Global\FastRDP_Frame_S<n>` (+ events `Global\FastRDP_FrameEvt_S<n>`, `Global\FastRDP_CtlEvt_S<n>`): header at 0, pointer block
 at 1024, display-control block at 2048, pointer shape at 4096 (up to 256×256), frame slots after
-that (up to 3840×2160 BGRA each). The Rust and C++ layouts are checked against each other by unit
+that (up to 3840×2160 BGRA each; an I420 frame uses 1.5 of the 4 bytes per pixel, its format is
+in the slot header). The Rust and C++ layouts are checked against each other by unit
 tests.
 
 ## Display

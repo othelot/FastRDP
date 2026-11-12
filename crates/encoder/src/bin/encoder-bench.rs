@@ -5,7 +5,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use clap::Parser;
-use encoder::{AdaptiveEncoder, EncoderKind, EncoderSettings, Frame};
+use encoder::{AdaptiveEncoder, EncoderKind, EncoderSettings, Frame, PixelFormat};
 
 #[derive(Parser, Debug)]
 #[command(name = "encoder-bench", version, about = "Measure FastRDP encoders and verify the output decodes")]
@@ -179,7 +179,7 @@ fn main() {
         if inject_at == Some(i) {
             enc.inject_runtime_failures(1);
         }
-        let f = Frame { width: w, height: h, stride: w as usize * 4, bgra: &buf, pts_us: (i as i64) * 1_000_000 / s.fps as i64 };
+        let f = Frame { width: w, height: h, stride: w as usize * 4, format: PixelFormat::Bgra, data: &buf, pts_us: (i as i64) * 1_000_000 / s.fps as i64 };
         let t = Instant::now();
         let p = enc.encode(&f).expect("encode");
         times.push(t.elapsed().as_secs_f64() * 1e3);

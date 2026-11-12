@@ -23,14 +23,40 @@ pub use settings::{EncoderKind, EncoderSettings};
 /// The encoder every other one falls back to (software, always available).
 pub const FALLBACK: EncoderKind = EncoderKind::OpenH264;
 
-/// One BGRA frame (e.g. a mapped IddCx swap-chain surface).
+/// Pixel layout of a [`Frame`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelFormat {
+    /// B, G, R, A bytes; `stride` bytes per row (the IddCx swap-chain format).
+    Bgra,
+    /// Planar 4:2:0, BT.709 limited range, tightly packed: Y (width x height), then U and V
+    /// (width/2 x height/2 each); `stride` = width. Converted on the GPU by the display driver.
+    I420,
+}
+
+/// One frame from the display driver.
 pub struct Frame<'a> {
     pub width: u32,
     pub height: u32,
-    /// Bytes per row.
+    /// Bytes per row (BGRA) / luma row length (I420).
     pub stride: usize,
-    pub bgra: &'a [u8],
+    pub format: PixelFormat,
+    pub data: &'a [u8],
     pub pts_us: i64,
+}
+
+impl Frame<'_> {
+    /// Y, U, V planes of an I420 frame (None for BGRA or a buffer that is too small).
+    pub fn i420_planes(&self) -> Option<(&[u8], &[u8], &[u8])> {
+        if self.format != PixelFormat::I420 {
+            return None;
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (ys, cs) = (w * h, w.div_ceil(2) * h.div_ceil(2));
+        let d = self.data.get(..ys + 2 * cs)?;
+        let (y, uv) = d.split_at(ys);
+        let (u, v) = uv.split_at(cs);
+        Some((y, u, v))
+    }
 }
 
 /// One encoded access unit, H.264 Annex-B.
@@ -243,7 +269,7 @@ mod tests {
     use super::*;
 
     fn frame(buf: &[u8], w: u32, h: u32, pts: i64) -> Frame<'_> {
-        Frame { width: w, height: h, stride: w as usize * 4, bgra: buf, pts_us: pts }
+        Frame { width: w, height: h, stride: w as usize * 4, format: PixelFormat::Bgra, data: buf, pts_us: pts }
     }
 
     fn pattern(w: usize, h: usize, t: usize) -> Vec<u8> {
@@ -321,6 +347,27 @@ mod tests {
         let ev = e.take_events();
         assert!(matches!(ev[0].phase, FallbackPhase::Runtime));
         assert_eq!((ev[0].from, ev[0].to), (FALLBACK, FALLBACK));
+    }
+
+    /// A frame the driver converted to I420 encodes to the same stream as the BGRA original
+    /// (the GPU shader uses the CPU conversion's integer formula).
+    #[test]
+    fn i420_frames_encode_like_their_bgra_source() {
+        let (w, h) = (320usize, 240usize);
+        let mut a = AdaptiveEncoder::new(EncoderSettings::default(), w as u32, h as u32).unwrap();
+        let mut b = AdaptiveEncoder::new(EncoderSettings::default(), w as u32, h as u32).unwrap();
+        for t in 0..5 {
+            let bgra = pattern(w, h, t);
+            let mut yuv = convert::I420::new(w, h);
+            convert::bgra_to_i420(&bgra, w * 4, &mut yuv, 0);
+            let planar = [yuv.y, yuv.u, yuv.v].concat();
+            let i420 = Frame { width: w as u32, height: h as u32, stride: w, format: PixelFormat::I420, data: &planar, pts_us: t as i64 };
+            let pa = a.encode(&frame(&bgra, w as u32, h as u32, t as i64)).unwrap().map(|p| p.data);
+            let pb = b.encode(&i420).unwrap().map(|p| p.data);
+            assert_eq!(pa, pb, "frame {t}");
+        }
+        let short = Frame { width: w as u32, height: h as u32, stride: w, format: PixelFormat::I420, data: &[0; 10], pts_us: 9 };
+        assert!(matches!(b.encode(&short), Err(EncodeError::InvalidInput(_))));
     }
 
     #[test]

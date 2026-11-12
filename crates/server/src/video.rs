@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use encoder::{AdaptiveEncoder, EncoderKind, EncoderSettings, Frame};
+use encoder::{AdaptiveEncoder, EncoderKind, EncoderSettings, Frame, PixelFormat};
 use frame_shm::FrameShm;
 use protocol::{CursorPos, CursorShape, Event, EventMsg, Message, StreamInfo};
 use tokio::sync::mpsc::UnboundedSender;
@@ -207,6 +207,7 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
     let (mut n_frames, mut n_bytes, mut n_dgrams, mut enc_ms) = (0u64, 0u64, 0u64, 0f64);
     let mut win = Instant::now();
     let mut cursor = CursorRelay::new();
+    let mut last_format = None;
     let mut cursor_pending = false;
     while !stop.load(Ordering::SeqCst) {
         shm.wait(if cursor_pending { 4 } else { 250 });
@@ -288,7 +289,12 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
             }
         }
         let te = Instant::now();
-        let f = Frame { width: w, height: h, stride: meta.stride as usize, bgra: &buf, pts_us: meta.pts_us };
+        let format = if meta.format == frame_shm::FORMAT_I420 { PixelFormat::I420 } else { PixelFormat::Bgra };
+        if last_format != Some(format) {
+            last_format = Some(format);
+            info!("{tag}: frames from the driver as {format:?}{}", if format == PixelFormat::I420 { " (converted on the GPU)" } else { "" });
+        }
+        let f = Frame { width: w, height: h, stride: meta.stride as usize, format, data: &buf, pts_us: meta.pts_us };
         let packet = match e.encode(&f) {
             Ok(p) => p,
             Err(err) => {

@@ -4,8 +4,8 @@
 //!
 //! * encode device: a CUDA context on CUDA device 0 (always the NVIDIA GPU, also on Optimus
 //!   laptops where the DXGI default adapter is the integrated one);
-//! * input: an NVENC-allocated ARGB buffer (= BGRA bytes) the frame is copied into; the RGB ->
-//!   YUV conversion happens on the GPU;
+//! * input: an NVENC-allocated buffer the frame is copied into - IYUV when the display driver
+//!   already converted it to I420 on the GPU, else ARGB (= BGRA bytes, converted by NVENC);
 //! * synchronous, P1..P7 preset with the ultra-low-latency tuning, CBR with a one-frame VBV,
 //!   no B-frames, infinite GOP (IDR only on request), SPS/PPS repeated with every IDR;
 //! * bitrate changes in place (`nvEncReconfigureEncoder`).

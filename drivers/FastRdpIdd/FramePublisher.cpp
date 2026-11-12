@@ -1,5 +1,6 @@
 #include "FramePublisher.h"
 #include <sddl.h>
+#include "ToI420.h"   // g_ToI420: cs_5_0 bytecode of ToI420.hlsl (FxCompile, $(IntDir))
 
 using namespace Microsoft::WRL;
 
@@ -25,6 +26,14 @@ FramePublisher::~FramePublisher()
     // the GPU driver here (see ReleaseGpu). Normally already released; otherwise leaked on purpose.
     m_Staging.Detach();
     m_StagingDevice = nullptr;
+    m_Cs.Detach();
+    m_CsSize.Detach();
+    m_CsSrc.Detach();
+    m_CsSrv.Detach();
+    m_CsDst.Detach();
+    m_CsUav.Detach();
+    m_CsStaging.Detach();
+    m_CsDevice = nullptr;
     if (m_pBase) UnmapViewOfFile(m_pBase);
     if (m_hSection) CloseHandle(m_hSection);
     if (m_hEvent) CloseHandle(m_hEvent);
@@ -39,6 +48,21 @@ void FramePublisher::ReleaseGpu(ID3D11Device* dev)
         m_StagingDevice = nullptr;
         m_StagingW = m_StagingH = 0;
     }
+    if (m_CsDevice && (dev == nullptr || m_CsDevice == dev)) ReleaseConverter();
+    if (dev == nullptr || m_CsUnsupported == dev) m_CsUnsupported = nullptr;
+}
+
+void FramePublisher::ReleaseConverter()
+{
+    m_CsStaging.Reset();
+    m_CsUav.Reset();
+    m_CsDst.Reset();
+    m_CsSrv.Reset();
+    m_CsSrc.Reset();
+    m_CsSize.Reset();
+    m_Cs.Reset();
+    m_CsDevice = nullptr;
+    m_CsW = m_CsH = 0;
 }
 
 bool FramePublisher::ReadControl(FastRdpShmControl& out)
@@ -160,19 +184,116 @@ void FramePublisher::PublishCursor(bool visible, int32_t x, int32_t y, uint32_t 
     SetEvent(m_hEvent);
 }
 
-HRESULT FramePublisher::Publish(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGIResource* surface,
-                                uint64_t frameNumber, int64_t ptsUs, uint32_t dirtyRects)
+static void BeginSlot(FastRdpShmSlot& slot, UINT width, UINT height, UINT stride, uint32_t format, const FramePublisher::SlotInfo& info)
 {
-    std::lock_guard<std::mutex> g(m_lock);
-    if (!m_pHeader) return E_NOT_VALID_STATE;
-    ComPtr<ID3D11Texture2D> src;
-    HRESULT hr = surface->QueryInterface(IID_PPV_ARGS(&src));
-    if (FAILED(hr)) return hr;
-    D3D11_TEXTURE2D_DESC d{};
-    src->GetDesc(&d);
-    if (d.Width > FASTRDP_SHM_MAX_WIDTH || d.Height > FASTRDP_SHM_MAX_HEIGHT) return E_INVALIDARG;
-    if (d.Format != DXGI_FORMAT_B8G8R8A8_UNORM && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) return E_NOTIMPL;
+    InterlockedIncrement64(&slot.seq);                    // odd: writing
+    slot.width = width;
+    slot.height = height;
+    slot.stride = stride;
+    slot.format = format;
+    slot.pts_us = info.ptsUs;
+    slot.frame_number = info.frameNumber;
+    slot.dirty_rects = info.dirtyRects;
+}
 
+HRESULT FramePublisher::EnsureConverter(ID3D11Device* dev, UINT width, UINT height)
+{
+    if (m_CsDevice == dev && m_CsW == width && m_CsH == height) return S_OK;
+    HRESULT hr = S_OK;
+    if (m_CsDevice != dev) {
+        ReleaseConverter();
+        // typed UAV stores to R8_UNORM: every feature level 11 device, also WARP
+        UINT support = 0;
+        if (dev->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0 || FAILED(dev->CheckFormatSupport(DXGI_FORMAT_R8_UNORM, &support)) ||
+            !(support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
+            return DXGI_ERROR_UNSUPPORTED;
+        }
+        hr = dev->CreateComputeShader(g_ToI420, sizeof(g_ToI420), nullptr, &m_Cs);
+        if (FAILED(hr)) return hr;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 16;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        hr = dev->CreateBuffer(&bd, nullptr, &m_CsSize);
+        if (FAILED(hr)) return hr;
+        m_CsDevice = dev;
+    }
+    m_CsStaging.Reset();
+    m_CsUav.Reset();
+    m_CsDst.Reset();
+    m_CsSrv.Reset();
+    m_CsSrc.Reset();
+    m_CsW = m_CsH = 0;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = width;
+    td.Height = height;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;   // also for _SRGB surfaces: the shader must see the stored bytes
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    hr = dev->CreateTexture2D(&td, nullptr, &m_CsSrc);
+    if (SUCCEEDED(hr)) hr = dev->CreateShaderResourceView(m_CsSrc.Get(), nullptr, &m_CsSrv);
+    td.Height = height + height / 2;
+    td.Format = DXGI_FORMAT_R8_UNORM;
+    td.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    if (SUCCEEDED(hr)) hr = dev->CreateTexture2D(&td, nullptr, &m_CsDst);
+    if (SUCCEEDED(hr)) hr = dev->CreateUnorderedAccessView(m_CsDst.Get(), nullptr, &m_CsUav);
+    td.Usage = D3D11_USAGE_STAGING;
+    td.BindFlags = 0;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (SUCCEEDED(hr)) hr = dev->CreateTexture2D(&td, nullptr, &m_CsStaging);
+    if (FAILED(hr)) return hr;
+    m_CsW = width;
+    m_CsH = height;
+    Log(L"FramePublisher: GPU I420 conversion %ux%u (1.5 bytes per pixel to the server)", width, height);
+    return S_OK;
+}
+
+HRESULT FramePublisher::PublishI420(ID3D11DeviceContext* ctx, ID3D11Texture2D* src, UINT width, UINT height, const SlotInfo& info,
+                                    FastRdpShmSlot& slot, uint8_t* dst)
+{
+    const UINT size[4] = { width, height, 0, 0 };
+    ctx->UpdateSubresource(m_CsSize.Get(), 0, nullptr, size, 0, 0);
+    ctx->CopyResource(m_CsSrc.Get(), src);   // same typeless group (B8G8R8A8), same size
+    ID3D11ShaderResourceView* srv = m_CsSrv.Get();
+    ID3D11UnorderedAccessView* uav = m_CsUav.Get();
+    ID3D11Buffer* cb = m_CsSize.Get();
+    ctx->CSSetShader(m_Cs.Get(), nullptr, 0);
+    ctx->CSSetShaderResources(0, 1, &srv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &cb);
+    ctx->Dispatch((width / 2 + 7) / 8, (height / 2 + 7) / 8, 1);
+    ID3D11ShaderResourceView* noSrv = nullptr;
+    ID3D11UnorderedAccessView* noUav = nullptr;
+    ctx->CSSetShaderResources(0, 1, &noSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+    ctx->CSSetShader(nullptr, nullptr, 0);
+    ctx->CopyResource(m_CsStaging.Get(), m_CsDst.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    HRESULT hr = ctx->Map(m_CsStaging.Get(), 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr)) return hr;
+
+    BeginSlot(slot, width, height, width, FASTRDP_SHM_FORMAT_I420, info);
+    const uint8_t* rows = static_cast<const uint8_t*>(m.pData);
+    const UINT cw = width / 2, ch = height / 2;
+    for (UINT y = 0; y < height; y++) memcpy(dst + static_cast<size_t>(y) * width, rows + static_cast<size_t>(y) * m.RowPitch, width);
+    uint8_t* u = dst + static_cast<size_t>(width) * height;
+    uint8_t* v = u + static_cast<size_t>(cw) * ch;
+    for (UINT y = 0; y < ch; y++) {
+        const uint8_t* row = rows + static_cast<size_t>(height + y) * m.RowPitch;   // U | V side by side
+        memcpy(u + static_cast<size_t>(y) * cw, row, cw);
+        memcpy(v + static_cast<size_t>(y) * cw, row + cw, cw);
+    }
+    ctx->Unmap(m_CsStaging.Get(), 0);
+    return S_OK;
+}
+
+HRESULT FramePublisher::PublishBgra(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* src, const D3D11_TEXTURE2D_DESC& d,
+                                    const SlotInfo& info, FastRdpShmSlot& slot, uint8_t* dst)
+{
+    HRESULT hr = S_OK;
     if (!m_Staging || m_StagingDevice != dev || m_StagingW != d.Width || m_StagingH != d.Height) {
         D3D11_TEXTURE2D_DESC sd = d;
         sd.Usage = D3D11_USAGE_STAGING;
@@ -188,26 +309,50 @@ HRESULT FramePublisher::Publish(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDX
         m_StagingW = d.Width;
         m_StagingH = d.Height;
     }
-    ctx->CopyResource(m_Staging.Get(), src.Get());
+    ctx->CopyResource(m_Staging.Get(), src);
     D3D11_MAPPED_SUBRESOURCE m{};
     hr = ctx->Map(m_Staging.Get(), 0, D3D11_MAP_READ, 0, &m);
     if (FAILED(hr)) return hr;
 
-    int32_t slotIdx = (m_pHeader->latest_slot + 1) % static_cast<int32_t>(FASTRDP_SHM_SLOTS);
-    FastRdpShmSlot& slot = m_pHeader->slots[slotIdx];
-    InterlockedIncrement64(&slot.seq);                    // odd: writing
-    slot.width = d.Width;
-    slot.height = d.Height;
-    slot.stride = d.Width * 4;
-    slot.format = FASTRDP_SHM_FORMAT_BGRA8;
-    slot.pts_us = ptsUs;
-    slot.frame_number = frameNumber;
-    slot.dirty_rects = dirtyRects;
-    uint8_t* dst = m_pBase + m_pHeader->data_offset + static_cast<uint64_t>(slotIdx) * m_pHeader->slot_bytes;
+    BeginSlot(slot, d.Width, d.Height, d.Width * 4, FASTRDP_SHM_FORMAT_BGRA8, info);
     const uint8_t* row = static_cast<const uint8_t*>(m.pData);
     const size_t rowBytes = static_cast<size_t>(d.Width) * 4;
     for (UINT y = 0; y < d.Height; y++, row += m.RowPitch, dst += rowBytes) memcpy(dst, row, rowBytes);
     ctx->Unmap(m_Staging.Get(), 0);
+    return S_OK;
+}
+
+HRESULT FramePublisher::Publish(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGIResource* surface,
+                                uint64_t frameNumber, int64_t ptsUs, uint32_t dirtyRects)
+{
+    std::lock_guard<std::mutex> g(m_lock);
+    if (!m_pHeader) return E_NOT_VALID_STATE;
+    ComPtr<ID3D11Texture2D> src;
+    HRESULT hr = surface->QueryInterface(IID_PPV_ARGS(&src));
+    if (FAILED(hr)) return hr;
+    D3D11_TEXTURE2D_DESC d{};
+    src->GetDesc(&d);
+    if (d.Width > FASTRDP_SHM_MAX_WIDTH || d.Height > FASTRDP_SHM_MAX_HEIGHT) return E_INVALIDARG;
+    if (d.Format != DXGI_FORMAT_B8G8R8A8_UNORM && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) return E_NOTIMPL;
+
+    const SlotInfo info{ frameNumber, ptsUs, dirtyRects };
+    int32_t slotIdx = (m_pHeader->latest_slot + 1) % static_cast<int32_t>(FASTRDP_SHM_SLOTS);
+    FastRdpShmSlot& slot = m_pHeader->slots[slotIdx];
+    uint8_t* dst = m_pBase + m_pHeader->data_offset + static_cast<uint64_t>(slotIdx) * m_pHeader->slot_bytes;
+
+    hr = E_FAIL;
+    if (m_CsUnsupported != dev && d.Width % 2 == 0 && d.Height % 2 == 0) {
+        hr = EnsureConverter(dev, d.Width, d.Height);
+        if (SUCCEEDED(hr)) hr = PublishI420(ctx, src.Get(), d.Width, d.Height, info, slot, dst);
+        if (FAILED(hr)) {
+            Log(L"FramePublisher: GPU I420 conversion not possible on this device (0x%08X), frames go as BGRA", hr);
+            ReleaseConverter();
+            m_CsUnsupported = dev;
+        }
+    }
+    if (FAILED(hr)) hr = PublishBgra(dev, ctx, src.Get(), d, info, slot, dst);
+    if (FAILED(hr)) return hr;
+
     InterlockedIncrement64(&slot.seq);                    // even: stable
     InterlockedExchange64(&m_pHeader->latest_frame, static_cast<int64_t>(frameNumber));
     InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_pHeader->latest_slot), slotIdx);

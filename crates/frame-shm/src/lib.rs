@@ -26,6 +26,9 @@ pub const CURSOR_MASKED_COLOR: u32 = 1;
 pub const CURSOR_ALPHA: u32 = 2;
 pub const TOTAL_BYTES: u64 = DATA_OFFSET + SLOTS as u64 * SLOT_BYTES;
 pub const FORMAT_BGRA8: u32 = 87;
+/// Planar 4:2:0 (FourCC 'I420'), BT.709 limited range, converted on the GPU by the driver: Y
+/// (width x height, `stride` = width), then U and V (width/2 x height/2 each), tightly packed.
+pub const FORMAT_I420: u32 = 0x3032_3449;
 
 #[repr(C)]
 pub struct Slot {
@@ -284,9 +287,26 @@ pub struct FrameMeta {
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+    /// `FORMAT_BGRA8` or `FORMAT_I420`
+    pub format: u32,
     pub pts_us: i64,
     pub frame_number: u64,
     pub dirty_rects: u32,
+}
+
+impl FrameMeta {
+    /// Size of the frame data, None for an unknown format or impossible dimensions.
+    pub fn bytes(&self) -> Option<usize> {
+        let (w, h, stride) = (self.width as usize, self.height as usize, self.stride as usize);
+        if w == 0 || self.width > MAX_WIDTH || self.height > MAX_HEIGHT {
+            return None;
+        }
+        match self.format {
+            FORMAT_BGRA8 if stride >= w * 4 => Some(stride * h),
+            FORMAT_I420 if stride == w && w % 2 == 0 && h % 2 == 0 => Some(w * h * 3 / 2),
+            _ => None,
+        }
+    }
 }
 
 pub struct FrameShm {
@@ -420,15 +440,13 @@ impl FrameShm {
                     width: std::ptr::read_volatile(&slot.width),
                     height: std::ptr::read_volatile(&slot.height),
                     stride: std::ptr::read_volatile(&slot.stride),
+                    format: std::ptr::read_volatile(&slot.format),
                     pts_us: std::ptr::read_volatile(&slot.pts_us),
                     frame_number: std::ptr::read_volatile(&slot.frame_number),
                     dirty_rects: std::ptr::read_volatile(&slot.dirty_rects),
                 }
             };
-            if meta.width == 0 || meta.width > MAX_WIDTH || meta.height > MAX_HEIGHT || meta.stride < meta.width * 4 {
-                continue;
-            }
-            let bytes = meta.stride as usize * meta.height as usize;
+            let Some(bytes) = meta.bytes() else { continue };
             dst.resize(bytes, 0);
             // SAFETY: slot data lies inside the mapping (bounds checked against MAX dimensions).
             unsafe {
@@ -502,6 +520,15 @@ impl TestProducer {
     }
 
     pub fn publish(&mut self, width: u32, height: u32, bgra: &[u8], pts_us: i64) {
+        self.publish_as(width, height, width * 4, FORMAT_BGRA8, &bgra[..(width * height * 4) as usize], pts_us);
+    }
+
+    /// Publishes an I420 frame (Y, U, V planes back to back), like the driver's GPU path.
+    pub fn publish_i420(&mut self, width: u32, height: u32, planes: &[u8], pts_us: i64) {
+        self.publish_as(width, height, width, FORMAT_I420, &planes[..(width * height * 3 / 2) as usize], pts_us);
+    }
+
+    fn publish_as(&mut self, width: u32, height: u32, stride: u32, format: u32, data: &[u8], pts_us: i64) {
         use windows_sys::Win32::System::Threading::SetEvent;
         // SAFETY: we own the producer side; layout checked; data bounded by MAX dims.
         unsafe {
@@ -511,13 +538,13 @@ impl TestProducer {
             (*slot).seq.fetch_add(1, Ordering::AcqRel);
             (*slot).width = width;
             (*slot).height = height;
-            (*slot).stride = width * 4;
-            (*slot).format = FORMAT_BGRA8;
+            (*slot).stride = stride;
+            (*slot).format = format;
             (*slot).pts_us = pts_us;
             self.frame += 1;
             (*slot).frame_number = self.frame;
             let dst = self.view.as_ptr().add((DATA_OFFSET + idx as u64 * SLOT_BYTES) as usize);
-            std::ptr::copy_nonoverlapping(bgra.as_ptr(), dst, (width * height * 4) as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
             (*slot).seq.fetch_add(1, Ordering::AcqRel);
             h.latest_frame.store(self.frame as i64, Ordering::Release);
             h.latest_slot.store(idx as i32, Ordering::Release);
@@ -653,5 +680,21 @@ mod tests {
             p.publish(64, 32, &px, 200 + i);
         }
         assert_eq!(c.read_latest(&mut buf).unwrap().frame_number, 6);
+        // the driver's GPU path: I420 planes, 1.5 bytes per pixel
+        let planes: Vec<u8> = (0..64 * 32 * 3 / 2).map(|i| (i * 3) as u8).collect();
+        p.publish_i420(64, 32, &planes, 300);
+        let m = c.read_latest(&mut buf).unwrap();
+        assert_eq!((m.format, m.stride, m.pts_us), (FORMAT_I420, 64, 300));
+        assert_eq!(buf, planes);
+    }
+
+    #[test]
+    fn frame_sizes_by_format() {
+        let m = |w, h, stride, format| FrameMeta { width: w, height: h, stride, format, pts_us: 0, frame_number: 0, dirty_rects: 0 };
+        assert_eq!(m(1920, 1080, 7680, FORMAT_BGRA8).bytes(), Some(1920 * 1080 * 4));
+        assert_eq!(m(1920, 1080, 1920, FORMAT_I420).bytes(), Some(1920 * 1080 * 3 / 2));
+        assert_eq!(m(1920, 1080, 1920, FORMAT_BGRA8).bytes(), None, "stride too small for BGRA");
+        assert_eq!(m(1920, 1081, 1920, FORMAT_I420).bytes(), None, "odd height");
+        assert_eq!(m(1920, 1080, 7680, 0).bytes(), None, "unknown format");
     }
 }

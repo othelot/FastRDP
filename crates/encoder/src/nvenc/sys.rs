@@ -36,6 +36,8 @@ pub const TUNING_INFO_ULTRA_LOW_LATENCY: u32 = 3;
 pub const RC_CBR: u32 = 2;
 /// 32-bit words with B in the lowest byte: BGRA in memory (the IddCx swap-chain format)
 pub const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
+/// planar Y, U, V (I420); chroma planes follow the luma plane with half the pitch
+pub const BUFFER_FORMAT_IYUV: u32 = 0x0000_0100;
 pub const PIC_STRUCT_FRAME: u32 = 1;
 pub const PIC_TYPE_I: u32 = 2;
 pub const PIC_TYPE_IDR: u32 = 3;

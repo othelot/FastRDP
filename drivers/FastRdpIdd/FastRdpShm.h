@@ -35,7 +35,10 @@
 #define FASTRDP_SHM_CURSOR_SHAPE_BYTES   (FASTRDP_SHM_CURSOR_MAX * FASTRDP_SHM_CURSOR_MAX * 4u)
 #define FASTRDP_SHM_DATA_OFFSET  (FASTRDP_SHM_CURSOR_SHAPE_OFFSET + FASTRDP_SHM_CURSOR_SHAPE_BYTES)
 #define FASTRDP_SHM_TOTAL_BYTES  (FASTRDP_SHM_DATA_OFFSET + FASTRDP_SHM_SLOTS * FASTRDP_SHM_SLOT_BYTES)
-#define FASTRDP_SHM_FORMAT_BGRA8 87u          /* DXGI_FORMAT_B8G8R8A8_UNORM */
+#define FASTRDP_SHM_FORMAT_BGRA8 87u          /* DXGI_FORMAT_B8G8R8A8_UNORM, stride = width * 4 */
+/* Planar 4:2:0 (FourCC 'I420'), BT.709 limited range, converted on the GPU (ToI420.hlsl): Y
+   (width x height, stride = width), then U and V (width/2 x height/2 each), tightly packed. */
+#define FASTRDP_SHM_FORMAT_I420  0x30323449u
 
 #pragma pack(push, 8)
 typedef struct FastRdpShmSlot {

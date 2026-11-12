@@ -8,7 +8,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEA
 use super::sys;
 use crate::backends::Backend;
 use crate::settings::{EncoderKind, EncoderSettings};
-use crate::{EncodeError, Frame, Packet};
+use crate::{EncodeError, Frame, Packet, PixelFormat};
 
 /// Loaded system DLL, freed on drop.
 struct Lib(HMODULE);
@@ -220,7 +220,8 @@ pub struct Nvenc {
     // Drop::drop destroys the session first; then the fields drop in this order, the CUDA
     // context (and nvcuda.dll) last.
     enc: sys::Encoder,
-    input: sys::InputPtr,
+    /// input buffers by frame format (created on first use): [ARGB, IYUV]
+    inputs: [sys::InputPtr; 2],
     output: sys::OutputPtr,
     /// kept for nvEncReconfigureEncoder (`init.encode_config` points into `config`)
     init: Box<sys::InitializeParams>,
@@ -258,7 +259,7 @@ impl Nvenc {
         let cuda = Cuda::open()?;
         let mut me = Nvenc {
             enc: std::ptr::null_mut(),
-            input: std::ptr::null_mut(),
+            inputs: [std::ptr::null_mut(); 2],
             output: std::ptr::null_mut(),
             init: sys::zeroed(),
             config: sys::zeroed(),
@@ -329,17 +330,7 @@ impl Nvenc {
         if rc != sys::SUCCESS {
             return Err(EncodeError::InitFailed(me.error("initialize", rc)));
         }
-        // buffers
-        let mut cin = sys::zeroed::<sys::CreateInputBuffer>();
-        cin.version = sys::CREATE_INPUT_BUFFER_VER;
-        cin.width = width;
-        cin.height = height;
-        cin.buffer_fmt = sys::BUFFER_FORMAT_ARGB;
-        let rc = call!(me.api, create_input_buffer(me.enc, &mut *cin));
-        if rc != sys::SUCCESS {
-            return Err(EncodeError::InitFailed(me.error("input buffer", rc)));
-        }
-        me.input = cin.input_buffer;
+        // output buffer (input buffers: per frame format, see `input`)
         let mut cbs = sys::zeroed::<sys::CreateBitstreamBuffer>();
         cbs.version = sys::CREATE_BITSTREAM_BUFFER_VER;
         let rc = call!(me.api, create_bitstream_buffer(me.enc, &mut *cbs));
@@ -351,27 +342,75 @@ impl Nvenc {
         Ok(me)
     }
 
-    /// Copies the frame into the NVENC input buffer.
-    fn upload(&mut self, f: &Frame<'_>) -> Result<u32, EncodeError> {
+    /// The input buffer for a frame format (NVENC buffer format, buffer), created on first use.
+    fn input(&mut self, format: PixelFormat) -> Result<(u32, sys::InputPtr), EncodeError> {
+        let (i, fmt) = match format {
+            PixelFormat::Bgra => (0, sys::BUFFER_FORMAT_ARGB),
+            PixelFormat::I420 => (1, sys::BUFFER_FORMAT_IYUV),
+        };
+        if self.inputs[i].is_null() {
+            let mut cin = sys::zeroed::<sys::CreateInputBuffer>();
+            cin.version = sys::CREATE_INPUT_BUFFER_VER;
+            cin.width = self.width;
+            cin.height = self.height;
+            cin.buffer_fmt = fmt;
+            let rc = call!(self.api, create_input_buffer(self.enc, &mut *cin));
+            if rc != sys::SUCCESS || cin.input_buffer.is_null() {
+                return Err(EncodeError::Runtime(self.error("input buffer", rc)));
+            }
+            self.inputs[i] = cin.input_buffer;
+        }
+        Ok((fmt, self.inputs[i]))
+    }
+
+    /// Copies the frame into its input buffer; returns (buffer format, buffer, luma pitch in bytes).
+    fn upload(&mut self, f: &Frame<'_>) -> Result<(u32, sys::InputPtr, u32), EncodeError> {
+        let (fmt, input) = self.input(f.format)?;
         let mut lock = sys::zeroed::<sys::LockInputBuffer>();
         lock.version = sys::LOCK_INPUT_BUFFER_VER;
-        lock.input_buffer = self.input;
+        lock.input_buffer = input;
         let rc = call!(self.api, lock_input_buffer(self.enc, &mut *lock));
         if rc != sys::SUCCESS || lock.buffer_data_ptr.is_null() {
             return Err(EncodeError::Runtime(self.error("lock input", rc)));
         }
-        let (row, pitch) = (self.width as usize * 4, lock.pitch as usize);
+        let (w, h, pitch) = (self.width as usize, self.height as usize, lock.pitch as usize);
         let dst = lock.buffer_data_ptr.cast::<u8>();
-        for y in 0..self.height as usize {
-            let src = &f.bgra[y * f.stride..y * f.stride + row];
-            // SAFETY: the locked buffer holds `height` rows of `pitch` >= width*4 bytes.
-            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(y * pitch), row) };
+        // (source rows, row length, destination offset, destination pitch) per plane
+        let copy = |src: &[u8], src_pitch: usize, rows: usize, row: usize, at: usize, dst_pitch: usize| {
+            for y in 0..rows {
+                let s = &src[y * src_pitch..y * src_pitch + row];
+                // SAFETY: the locked buffer holds the planes of a `height`-row surface with this
+                // pitch (IYUV: chroma planes after the luma plane, half pitch, half height).
+                unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), dst.add(at + y * dst_pitch), row) };
+            }
+        };
+        let ok = match f.format {
+            PixelFormat::Bgra => {
+                let enough = f.data.len() >= f.stride * (h - 1) + w * 4;
+                if enough {
+                    copy(f.data, f.stride, h, w * 4, 0, pitch);
+                }
+                enough
+            }
+            PixelFormat::I420 => match f.i420_planes() {
+                Some((y, u, v)) => {
+                    let (cw, ch, cp) = (w / 2, h / 2, pitch / 2);
+                    copy(y, w, h, w, 0, pitch);
+                    copy(u, cw, ch, cw, pitch * h, cp);
+                    copy(v, cw, ch, cw, pitch * h + cp * ch, cp);
+                    true
+                }
+                None => false,
+            },
+        };
+        let rc = call!(self.api, unlock_input_buffer(self.enc, input));
+        if !ok {
+            return Err(EncodeError::InvalidInput("frame buffer too small".into()));
         }
-        let rc = call!(self.api, unlock_input_buffer(self.enc, self.input));
         if rc != sys::SUCCESS {
             return Err(EncodeError::Runtime(self.error("unlock input", rc)));
         }
-        Ok(lock.pitch)
+        Ok((fmt, input, lock.pitch))
     }
 }
 
@@ -389,8 +428,10 @@ impl Drop for Nvenc {
     fn drop(&mut self) {
         let _ctx = self.cuda.bind();
         if !self.enc.is_null() {
-            if !self.input.is_null() {
-                call!(self.api, destroy_input_buffer(self.enc, self.input));
+            for input in self.inputs {
+                if !input.is_null() {
+                    call!(self.api, destroy_input_buffer(self.enc, input));
+                }
             }
             if !self.output.is_null() {
                 call!(self.api, destroy_bitstream_buffer(self.enc, self.output));
@@ -429,7 +470,7 @@ impl Backend for Nvenc {
             return Err(EncodeError::InvalidInput("frame size changed".into()));
         }
         let _ctx = self.cuda.bind();
-        let pitch = self.upload(f)?;
+        let (fmt, input, pitch) = self.upload(f)?;
         let mut pic = sys::zeroed::<sys::PicParams>();
         pic.version = sys::PIC_PARAMS_VER;
         pic.input_width = self.width;
@@ -438,9 +479,9 @@ impl Backend for Nvenc {
         pic.encode_pic_flags = if force_idr { sys::PIC_FLAG_FORCEIDR | sys::PIC_FLAG_OUTPUT_SPSPPS } else { 0 };
         pic.frame_idx = self.frame_idx;
         pic.input_time_stamp = f.pts_us as u64;
-        pic.input_buffer = self.input;
+        pic.input_buffer = input;
         pic.output_bitstream = self.output;
-        pic.buffer_fmt = sys::BUFFER_FORMAT_ARGB;
+        pic.buffer_fmt = fmt;
         pic.picture_struct = sys::PIC_STRUCT_FRAME;
         self.frame_idx = self.frame_idx.wrapping_add(1);
         let rc = call!(self.api, encode_picture(self.enc, &mut *pic));

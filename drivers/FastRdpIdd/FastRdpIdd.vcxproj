@@ -20,6 +20,17 @@
     <ClInclude Include="FastRdpShm.h" />
   </ItemGroup>
   <ItemGroup>
+    <!-- BGRA -> I420 on the render GPU; bytecode header g_ToI420 in $(IntDir) (included by FramePublisher.cpp) -->
+    <FxCompile Include="ToI420.hlsl">
+      <ShaderType>Compute</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>main</EntryPointName>
+      <VariableName>g_ToI420</VariableName>
+      <HeaderFileOutput>$(IntDir)ToI420.h</HeaderFileOutput>
+      <ObjectFileOutput>$(IntDir)ToI420.cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemGroup>
+  <ItemGroup>
     <Inf Include="FastRdpIdd.inf" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -65,6 +76,7 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <PreprocessorDefinitions>_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/D_ATL_NO_WIN_SUPPORT /DUMDF_DRIVER /DIDDCX_VERSION_MAJOR=1 /DIDDCX_VERSION_MINOR=10 /DIDDCX_MINIMUM_VERSION_REQUIRED=4 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>

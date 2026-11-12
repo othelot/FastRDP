@@ -4,7 +4,7 @@
 
 use crate::convert::{I420, bgra_to_i420};
 use crate::settings::{EncoderKind, EncoderSettings};
-use crate::{EncodeError, Frame, Packet};
+use crate::{EncodeError, Frame, Packet, PixelFormat};
 
 pub trait Backend: Send {
     fn kind(&self) -> EncoderKind;
@@ -93,12 +93,22 @@ impl Backend for OpenH264Enc {
         if f.width as usize != self.yuv.width || f.height as usize != self.yuv.height {
             return Err(EncodeError::InvalidInput("frame size changed".into()));
         }
-        bgra_to_i420(f.bgra, f.stride, &mut self.yuv, 0);
         if force_idr {
             self.enc.force_intra_frame();
         }
-        let y = &self.yuv;
-        let src = YUVSlices::new((&y.y, &y.u, &y.v), (y.width, y.height), (y.y_stride(), y.c_stride(), y.c_stride()));
+        let (w, cw) = (self.yuv.width, self.yuv.c_stride());
+        let src = match f.format {
+            // already converted by the display driver on the GPU
+            PixelFormat::I420 => {
+                let (y, u, v) = f.i420_planes().ok_or_else(|| EncodeError::InvalidInput("I420 frame too small".into()))?;
+                YUVSlices::new((y, u, v), (w, self.yuv.height), (w, cw, cw))
+            }
+            PixelFormat::Bgra => {
+                bgra_to_i420(f.data, f.stride, &mut self.yuv, 0);
+                let y = &self.yuv;
+                YUVSlices::new((&y.y, &y.u, &y.v), (y.width, y.height), (y.y_stride(), y.c_stride(), y.c_stride()))
+            }
+        };
         let bs = self.enc.encode(&src).map_err(|e| EncodeError::Runtime(format!("openh264 encode: {e}")))?;
         let ft = bs.frame_type();
         if matches!(ft, FrameType::Skip | FrameType::Invalid) {
