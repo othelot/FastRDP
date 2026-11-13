@@ -158,7 +158,7 @@ void FramePublisher::Heartbeat()
     }
 }
 
-void FramePublisher::PublishCursor(bool visible, int32_t x, int32_t y, uint32_t shapeId, const IDDCX_CURSOR_SHAPE_INFO* info, const uint8_t* shape)
+void FramePublisher::PublishCursor(bool visible, int32_t x, int32_t y, const IDDCX_CURSOR_SHAPE_INFO* info, const uint8_t* shape)
 {
     std::lock_guard<std::mutex> g(m_lock);
     if (!m_pHeader) return;
@@ -171,7 +171,11 @@ void FramePublisher::PublishCursor(bool visible, int32_t x, int32_t y, uint32_t 
         uint8_t* dst = m_pBase + FASTRDP_SHM_CURSOR_SHAPE_OFFSET;
         for (UINT row = 0; row < info->Height; row++)
             memcpy(dst + static_cast<size_t>(row) * info->Width * 4, shape + static_cast<size_t>(row) * info->Pitch, static_cast<size_t>(info->Width) * 4);
-        c->shape_id = shapeId;
+        // Our own number, not Windows' shape id: Windows numbers shapes per monitor, so a new monitor
+        // or swap-chain in the same session repeats ids for other shapes, and the server only re-reads
+        // the shape when the id changes. Counting on from the value in the section keeps it unique for
+        // as long as the section exists (also across driver restarts).
+        c->shape_id = c->shape_id + 1 != 0 ? c->shape_id + 1 : 1;
         c->shape_type = static_cast<uint32_t>(info->CursorType);
         c->width = info->Width;
         c->height = info->Height;

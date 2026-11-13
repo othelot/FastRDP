@@ -30,7 +30,7 @@ public:
     // after 60 s, and TermService waited for that on every disconnect/reconnect.
     void ReleaseGpu(ID3D11Device* dev);
     // Publishes hardware-cursor state; `shape` (nullptr = unchanged) is Height rows of `Pitch` bytes.
-    void PublishCursor(bool visible, int32_t x, int32_t y, uint32_t shapeId, const IDDCX_CURSOR_SHAPE_INFO* info, const uint8_t* shape);
+    void PublishCursor(bool visible, int32_t x, int32_t y, const IDDCX_CURSOR_SHAPE_INFO* info, const uint8_t* shape);
 
 private:
     FramePublisher() = default;

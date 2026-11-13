@@ -215,8 +215,6 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
     let mut buf = Vec::new();
     let mut last_frame = -1i64;
     let mut force = true;
-    let (mut n_frames, mut n_bytes, mut n_dgrams, mut enc_ms) = (0u64, 0u64, 0u64, 0f64);
-    let mut win = Instant::now();
     let mut cursor = CursorRelay::new(p.cursor_ids.clone());
     let mut cursor_pending = false;
     while !stop.load(Ordering::SeqCst) {
@@ -298,7 +296,6 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
                 }
             }
         }
-        let te = Instant::now();
         let format = if meta.format == frame_shm::FORMAT_I420 { PixelFormat::I420 } else { PixelFormat::Bgra };
         let f = Frame { width: w, height: h, stride: meta.stride as usize, format, data: &buf, pts_us: meta.pts_us };
         let packet = match e.encode(&f) {
@@ -308,7 +305,6 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
                 continue;
             }
         };
-        enc_ms += te.elapsed().as_secs_f64() * 1e3;
         let events = e.take_events();
         if !events.is_empty() {
             for ev in events {
@@ -326,30 +322,10 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
         }
         let (_, dgs) = pk.packetize(&pkt.data, pkt.keyframe, encoder_code(pkt.encoder), meta.pts_us);
         for d in dgs {
-            n_dgrams += 1;
             if let Err(err) = conn.send_datagram(Bytes::from(d)) {
                 warn!("{tag}: send_datagram: {err} - stopping");
                 return;
             }
-        }
-        n_frames += 1;
-        n_bytes += pkt.data.len() as u64;
-        if win.elapsed() >= Duration::from_secs(5) {
-            let s = win.elapsed().as_secs_f64();
-            let st = conn.stats();
-            info!(
-                "{tag}: {:.1} fps, {:.2} Mbps, {:.0} dgram/s, encode avg {:.2} ms, fec {:.0}%, rtt {:?}, cwnd {}, lost pkts {}",
-                n_frames as f64 / s,
-                n_bytes as f64 * 8.0 / s / 1e6,
-                n_dgrams as f64 / s,
-                if n_frames > 0 { enc_ms / n_frames as f64 } else { 0.0 },
-                pk.fec_ratio * 100.0,
-                st.path.rtt,
-                st.path.cwnd,
-                st.path.lost_packets
-            );
-            (n_frames, n_bytes, n_dgrams, enc_ms) = (0, 0, 0, 0.0);
-            win = Instant::now();
         }
     }
     info!("{tag}: stopped ({} cursor shape(s) sent)", cursor.shapes);

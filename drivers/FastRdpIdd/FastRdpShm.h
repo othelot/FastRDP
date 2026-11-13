@@ -75,7 +75,7 @@ typedef struct FastRdpShmCursor {
     uint32_t visible;
     int32_t  x;                    /* top-left of the cursor image in desktop pixels (may be negative) */
     int32_t  y;
-    uint32_t shape_id;             /* changes whenever the shape bytes change; 0 = no shape yet */
+    uint32_t shape_id;             /* driver's counter, +1 whenever the shape bytes change; 0 = no shape yet */
     uint32_t shape_type;           /* IDDCX_CURSOR_SHAPE_TYPE */
     uint32_t width;
     uint32_t height;

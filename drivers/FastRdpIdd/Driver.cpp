@@ -374,12 +374,9 @@ void SwapChainProcessor::CursorLoop()
         const bool updated = Out.IsCursorShapeUpdated && Out.CursorShapeInfo.Width > 0;
         if (updated) {
             lastShapeId = Out.CursorShapeInfo.ShapeId;
-            if (shapes++ < 20)
-                Log(L"cursor shape %u type=%u %ux%u pitch=%u hot=%u,%u", lastShapeId, Out.CursorShapeInfo.CursorType,
-                    Out.CursorShapeInfo.Width, Out.CursorShapeInfo.Height, Out.CursorShapeInfo.Pitch,
-                    Out.CursorShapeInfo.XHot, Out.CursorShapeInfo.YHot);
+            ++shapes;
         }
-        FramePublisher::Instance().PublishCursor(Out.IsCursorVisible != FALSE, Out.X, Out.Y, lastShapeId,
+        FramePublisher::Instance().PublishCursor(Out.IsCursorVisible != FALSE, Out.X, Out.Y,
                                                  updated ? &Out.CursorShapeInfo : nullptr, updated ? shape.data() : nullptr);
     }
     Log(L"cursor thread stopped after %llu queries (%llu shapes)", queries, shapes);
@@ -429,21 +426,12 @@ bool SwapChainProcessor::RunCore()
     if (FAILED(hr)) return true;
 
     UINT64 frames = 0;
-    UINT64 windowFrames = 0;
-    ULONGLONG windowStart = GetTickCount64();
     bool firstLogged = false;
 
     bool publisherReady = FramePublisher::Instance().Ensure(m_SessionId);
     if (publisherReady) SetupCursor();
     UINT publishErrors = 0;
     for (;;) {
-        ULONGLONG now = GetTickCount64();
-        if (now - windowStart >= 5000) {
-            Log(L"frames: session=%lu total=%llu last%.1fs=%llu (%.1f fps)", m_SessionId, frames,
-                (now - windowStart) / 1000.0, windowFrames, windowFrames * 1000.0 / static_cast<double>(now - windowStart));
-            windowFrames = 0;
-            windowStart = now;
-        }
         if (publisherReady) FramePublisher::Instance().Heartbeat();
         IDARG_OUT_RELEASEANDACQUIREBUFFER Buffer = {};
         hr = IddCxSwapChainReleaseAndAcquireBuffer(m_hSwapChain, &Buffer);
@@ -468,7 +456,6 @@ bool SwapChainProcessor::RunCore()
         ComPtr<IDXGIResource> AcquiredBuffer;
         AcquiredBuffer.Attach(Buffer.MetaData.pSurface);
         ++frames;
-        ++windowFrames;
 
         if (!firstLogged) {
             ComPtr<ID3D11Texture2D> tex;
