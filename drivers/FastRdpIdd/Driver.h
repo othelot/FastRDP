@@ -71,11 +71,6 @@ private:
     void Run();
     // Returns true when the swap-chain was lost (driver must delete it so IddCx re-assigns a new one).
     bool RunCore();
-    // Hardware cursor: the OS then stops drawing the pointer into the frames and reports shape and
-    // position separately (published to shared memory, rendered by the client).
-    void SetupCursor();
-    static DWORD CALLBACK CursorThread(LPVOID Argument);
-    void CursorLoop();
 
     IDDCX_MONITOR m_Monitor;
     IDDCX_SWAPCHAIN m_hSwapChain;
@@ -84,9 +79,6 @@ private:
     ULONG m_SessionId;
     Microsoft::WRL::Wrappers::Thread m_hThread;
     Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
-    Microsoft::WRL::Wrappers::Event m_hCursorEvent;
-    Microsoft::WRL::Wrappers::Event m_hCursorStop;
-    Microsoft::WRL::Wrappers::Thread m_hCursorThread;
 };
 
 class IndirectDeviceContext {
@@ -139,11 +131,28 @@ public:
 
     void AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
     void UnassignSwapChain();
+    // Hardware cursor: the OS then stops drawing the pointer into the frames and reports shape and
+    // position separately (published to shared memory, rendered by the client). Committing a mode
+    // turns the software cursor back on for the path, and while the hardware cursor is off the OS's
+    // pointer calls fail and Windows keeps drawing the pointer itself. So, like Microsoft's RDP IDD
+    // (RdpIdEvtIddCxAdapterCommitModes2 -> CRdpIdMonitor::SetCursorMode), this is called from the
+    // commit callbacks for every active path - not once a swap-chain is running, which left the
+    // pointer in software after commits for good. The cursor event and thread live as long as the
+    // monitor, not a swap-chain.
+    void EnableHardwareCursor();
 
 private:
+    static DWORD CALLBACK CursorThread(LPVOID Argument);
+    void CursorLoop();
+
     IDDCX_MONITOR m_Monitor;
     ULONG m_SessionId;
     std::unique_ptr<SwapChainProcessor> m_ProcessingThread;
+    std::mutex m_CursorLock;   // EnableHardwareCursor: commit callbacks vs. swap-chain assignment
+    bool m_CursorEnabled = false;
+    Microsoft::WRL::Wrappers::Event m_hCursorEvent;
+    Microsoft::WRL::Wrappers::Event m_hCursorStop;
+    Microsoft::WRL::Wrappers::Thread m_hCursorThread;
 };
 
 } // namespace FastRdp

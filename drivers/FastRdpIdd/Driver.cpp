@@ -317,8 +317,6 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN hS
     : m_Monitor(Monitor), m_hSwapChain(hSwapChain), m_Device(std::move(Device)), m_hAvailableBufferEvent(NewFrameEvent), m_SessionId(SessionId)
 {
     m_hTerminateEvent.Attach(CreateEvent(nullptr, TRUE, FALSE, nullptr)); // manual-reset: also polled after RunCore
-    m_hCursorEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
-    m_hCursorStop.Attach(CreateEvent(nullptr, TRUE, FALSE, nullptr));
     m_hThread.Attach(CreateThread(nullptr, 0, RunThread, this, 0, nullptr));
 }
 
@@ -326,13 +324,13 @@ SwapChainProcessor::~SwapChainProcessor()
 {
     SetEvent(m_hTerminateEvent.Get());
     if (m_hThread.Get()) WaitForSingleObject(m_hThread.Get(), INFINITE);
-    SetEvent(m_hCursorStop.Get());
-    if (m_hCursorThread.Get()) WaitForSingleObject(m_hCursorThread.Get(), INFINITE);
 }
 
-void SwapChainProcessor::SetupCursor()
+void IndirectMonitorContext::EnableHardwareCursor()
 {
-    if (m_hCursorThread.Get()) return;
+    std::lock_guard<std::mutex> g(m_CursorLock);
+    // the cursor thread publishes into the session's shared memory
+    if (!FramePublisher::Instance().Ensure(m_SessionId)) return;
     IDARG_IN_SETUP_HWCURSOR In = {};
     In.CursorInfo.Size = sizeof(In.CursorInfo);
     In.CursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL; // the client renders XOR pixels itself
@@ -341,17 +339,19 @@ void SwapChainProcessor::SetupCursor()
     In.CursorInfo.MaxY = FASTRDP_SHM_CURSOR_MAX;
     In.hNewCursorDataAvailable = m_hCursorEvent.Get();
     NTSTATUS st = IddCxMonitorSetupHardwareCursor(m_Monitor, &In);
-    Log(L"IddCxMonitorSetupHardwareCursor(max %u, xor full, alpha) -> 0x%08X", FASTRDP_SHM_CURSOR_MAX, st);
-    if (NT_SUCCESS(st)) m_hCursorThread.Attach(CreateThread(nullptr, 0, CursorThread, this, 0, nullptr));
+    if (!m_CursorEnabled || !NT_SUCCESS(st)) Log(L"IddCxMonitorSetupHardwareCursor(max %u, xor full, alpha) -> 0x%08X", FASTRDP_SHM_CURSOR_MAX, st);
+    if (!NT_SUCCESS(st)) return;
+    m_CursorEnabled = true;
+    if (!m_hCursorThread.Get()) m_hCursorThread.Attach(CreateThread(nullptr, 0, CursorThread, this, 0, nullptr));
 }
 
-DWORD CALLBACK SwapChainProcessor::CursorThread(LPVOID Argument)
+DWORD CALLBACK IndirectMonitorContext::CursorThread(LPVOID Argument)
 {
-    reinterpret_cast<SwapChainProcessor*>(Argument)->CursorLoop();
+    reinterpret_cast<IndirectMonitorContext*>(Argument)->CursorLoop();
     return 0;
 }
 
-void SwapChainProcessor::CursorLoop()
+void IndirectMonitorContext::CursorLoop()
 {
     std::vector<BYTE> shape(FASTRDP_SHM_CURSOR_SHAPE_BYTES);
     DWORD lastShapeId = 0;
@@ -393,7 +393,6 @@ void SwapChainProcessor::Run()
     DWORD AvTask = 0;
     HANDLE AvTaskHandle = AvSetMmThreadCharacteristicsW(L"Distribution", &AvTask);
     bool lost = RunCore();
-    SetEvent(m_hCursorStop.Get()); // the hardware-cursor setup belongs to this swap-chain
     // GPU objects made on this swap-chain's device go now, on this thread (see FramePublisher::ReleaseGpu)
     FramePublisher::Instance().ReleaseGpu(m_Device->Device.Get());
     if (lost && WaitForSingleObject(m_hTerminateEvent.Get(), 0) == WAIT_OBJECT_0) {
@@ -429,7 +428,6 @@ bool SwapChainProcessor::RunCore()
     bool firstLogged = false;
 
     bool publisherReady = FramePublisher::Instance().Ensure(m_SessionId);
-    if (publisherReady) SetupCursor();
     UINT publishErrors = 0;
     for (;;) {
         if (publisherReady) FramePublisher::Instance().Heartbeat();
@@ -717,10 +715,14 @@ NTSTATUS IndirectDeviceContext::ApplyDisplayConfig(const ModeEntry& m, UINT scal
 IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor, ULONG SessionId)
     : m_Monitor(Monitor), m_SessionId(SessionId)
 {
+    m_hCursorEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
+    m_hCursorStop.Attach(CreateEvent(nullptr, TRUE, FALSE, nullptr));
 }
 
 IndirectMonitorContext::~IndirectMonitorContext()
 {
+    SetEvent(m_hCursorStop.Get());
+    if (m_hCursorThread.Get()) WaitForSingleObject(m_hCursorThread.Get(), INFINITE);
     m_ProcessingThread.reset();
 }
 
@@ -737,6 +739,13 @@ void IndirectMonitorContext::AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID Ren
         return;
     }
     m_ProcessingThread.reset(new SwapChainProcessor(m_Monitor, SwapChain, Device, NewFrameEvent, m_SessionId));
+    // normally enabled by the commit that preceded this swap-chain; if none did yet, now
+    bool enabled;
+    {
+        std::lock_guard<std::mutex> g(m_CursorLock);
+        enabled = m_CursorEnabled;
+    }
+    if (!enabled) EnableHardwareCursor();
 }
 
 void IndirectMonitorContext::UnassignSwapChain()
@@ -758,6 +767,14 @@ NTSTATUS FastRdpIddAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_
     return STATUS_SUCCESS;
 }
 
+// The commit just turned the software cursor back on for the path: hardware cursor again, here (see
+// IndirectMonitorContext::EnableHardwareCursor).
+static void EnableHardwareCursorAfterCommit(IDDCX_MONITOR monitor, UINT flags)
+{
+    if (!monitor || !(flags & IDDCX_PATH_FLAGS_ACTIVE)) return;
+    if (auto* mon = WdfObjectGet_IndirectMonitorContextWrapper(monitor)->pContext) mon->EnableHardwareCursor();
+}
+
 _Use_decl_annotations_
 NTSTATUS FastRdpIddAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_IN_COMMITMODES* pInArgs)
 {
@@ -768,6 +785,7 @@ NTSTATUS FastRdpIddAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_I
         const auto& s = p.TargetVideoSignalInfo;
         Log(L"  path %u flags=0x%X active=%d %ux%u @ %u/%u", i, p.Flags, (p.Flags & IDDCX_PATH_FLAGS_ACTIVE) ? 1 : 0,
             s.activeSize.cx, s.activeSize.cy, s.vSyncFreq.Numerator, s.vSyncFreq.Denominator);
+        EnableHardwareCursorAfterCommit(p.MonitorObject, p.Flags);
     }
     return STATUS_SUCCESS;
 }
@@ -873,6 +891,7 @@ NTSTATUS FastRdpIddAdapterCommitModes2(IDDCX_ADAPTER AdapterObject, const IDARG_
         const auto& s = p.TargetVideoSignalInfo;
         Log(L"  path %u flags=0x%X active=%d %ux%u @ %u/%u", i, p.Flags, (p.Flags & IDDCX_PATH_FLAGS_ACTIVE) ? 1 : 0,
             s.activeSize.cx, s.activeSize.cy, s.vSyncFreq.Numerator, s.vSyncFreq.Denominator);
+        EnableHardwareCursorAfterCommit(p.MonitorObject, p.Flags);
     }
     return STATUS_SUCCESS;
 }
