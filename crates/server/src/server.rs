@@ -255,6 +255,7 @@ async fn handle(cfg: Arc<Config>, inc: quinn::Incoming, agents: Agents) -> Resul
     // video thread(s): (re)start when the session id is known / changes (reconnect to an existing session)
     let mut video: Option<(Arc<AtomicBool>, tokio::task::JoinHandle<()>)> = None;
     let frame_ids = Arc::new(std::sync::atomic::AtomicU32::new(1)); // continuous across session switches
+    let cursor_ids = Arc::new(std::sync::atomic::AtomicU32::new(1)); // pointer shape ids, unique per connection
     // The provider reader task owns the pipe's read half: it must be aborted on teardown, otherwise the
     // pipe stays open and the provider never sees EOF (session would stay Active without a client).
     let provider_abort = provider_task.as_ref().map(|(rx, _, _)| rx.abort_handle());
@@ -280,7 +281,7 @@ async fn handle(cfg: Arc<Config>, inc: quinn::Incoming, agents: Agents) -> Resul
                 if let Some((s, _)) = video.take() { s.store(true, Ordering::SeqCst); }
                 let s = Arc::new(AtomicBool::new(false));
                 let (c, ctrl, fbv, sv) = (conn.clone(), ctrl_tx.clone(), fb.clone(), s.clone());
-                let params = VideoParams { frame_ids: frame_ids.clone(), desktop: desktop.clone(), session: sid, fec_base: cfg.fec_base, refresh_hz: refresh_hz.clone(), bitrate_kbps: bitrate_kbps.clone() };
+                let params = VideoParams { frame_ids: frame_ids.clone(), desktop: desktop.clone(), session: sid, fec_base: cfg.fec_base, refresh_hz: refresh_hz.clone(), bitrate_kbps: bitrate_kbps.clone(), cursor_ids: cursor_ids.clone() };
                 info!("[{remote}] session {sid}: starting video");
                 video = Some((s, tokio::task::spawn_blocking(move || video::run(c, params, ctrl, fbv, sv))));
             }

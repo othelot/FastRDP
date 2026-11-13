@@ -31,6 +31,8 @@ pub struct VideoParams {
     pub refresh_hz: Arc<AtomicU32>,
     /// bitrate target the client asked for (kbit/s, 0 = automatic)
     pub bitrate_kbps: Arc<AtomicU32>,
+    /// pointer shape ids on the wire, unique per connection (see CursorRelay)
+    pub cursor_ids: Arc<AtomicU32>,
 }
 
 pub fn encoder_code(k: EncoderKind) -> u8 {
@@ -47,8 +49,16 @@ fn stream_info(e: &AdaptiveEncoder, w: u32, h: u32, fps: u32) -> Message {
 
 /// Forwards the driver's hardware-cursor state: the shape when it changes, the hotspot position
 /// coalesced to at most one message per `MIN_POS_INTERVAL`.
+///
+/// Windows numbers pointer shapes per monitor, so after a session switch (sign-in screen -> the
+/// user's session) or a new display the same id stands for another shape; the client caches its
+/// cursors by id and kept showing the old one. Shapes therefore go out with ids of this connection.
 struct CursorRelay {
+    /// the driver's id of the current shape
     shape_id: u32,
+    /// its id on the wire
+    wire_id: u32,
+    ids: Arc<AtomicU32>,
     hot: (i32, i32),
     last_sent: Option<CursorPos>,
     sent_at: Instant,
@@ -59,8 +69,8 @@ struct CursorRelay {
 const MIN_POS_INTERVAL: Duration = Duration::from_millis(8);
 
 impl CursorRelay {
-    fn new() -> Self {
-        CursorRelay { shape_id: 0, hot: (0, 0), last_sent: None, sent_at: Instant::now(), pending: false, shapes: 0 }
+    fn new(ids: Arc<AtomicU32>) -> Self {
+        CursorRelay { shape_id: 0, wire_id: 0, ids, hot: (0, 0), last_sent: None, sent_at: Instant::now(), pending: false, shapes: 0 }
     }
 
     /// Returns true while a position update is waiting for the rate limit.
@@ -68,11 +78,12 @@ impl CursorRelay {
         let Some((st, shape)) = shm.read_cursor(self.shape_id) else { return self.pending };
         if let Some(s) = shape {
             self.shape_id = s.id;
+            self.wire_id = self.ids.fetch_add(1, Ordering::Relaxed);
             self.hot = (s.x_hot as i32, s.y_hot as i32);
             self.shapes += 1;
             let rgba = protocol::cursor::rgba_from_bgra(s.shape_type, &s.bgra);
             let _ = ctrl.send(Message::CursorShape(CursorShape {
-                id: s.id,
+                id: self.wire_id,
                 width: s.width as u16,
                 height: s.height as u16,
                 hot_x: s.x_hot as u16,
@@ -80,7 +91,7 @@ impl CursorRelay {
                 rgba,
             }));
         }
-        let pos = CursorPos { visible: st.visible, x: st.x + self.hot.0, y: st.y + self.hot.1, shape_id: self.shape_id };
+        let pos = CursorPos { visible: st.visible, x: st.x + self.hot.0, y: st.y + self.hot.1, shape_id: self.wire_id };
         if self.last_sent == Some(pos) {
             self.pending = false;
             return false;
@@ -206,7 +217,7 @@ pub fn run(conn: quinn::Connection, p: VideoParams, ctrl: UnboundedSender<Messag
     let mut force = true;
     let (mut n_frames, mut n_bytes, mut n_dgrams, mut enc_ms) = (0u64, 0u64, 0u64, 0f64);
     let mut win = Instant::now();
-    let mut cursor = CursorRelay::new();
+    let mut cursor = CursorRelay::new(p.cursor_ids.clone());
     let mut cursor_pending = false;
     while !stop.load(Ordering::SeqCst) {
         shm.wait(if cursor_pending { 4 } else { 250 });
