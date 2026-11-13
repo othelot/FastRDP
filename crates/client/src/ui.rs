@@ -270,7 +270,10 @@ impl App {
             _ => (None, 1.0),
         };
         let visible = self.cursor_pos.map(|p| p.visible).unwrap_or(false);
-        crate::native_cursor::update(self.cursor_shape.as_deref(), visible, picture, ratio);
+        // session input devices: the session has a mouse, so "hidden" really is hidden (or drawn
+        // into the picture by Windows) - see native_cursor::update
+        let hide_hidden = self.input_path == Some(protocol::input_path::DEVICES);
+        crate::native_cursor::update(self.cursor_shape.as_deref(), visible, picture, ratio, hide_hidden);
     }
 
     /// macOS: hands the remote pointer (shape, visibility, picture rectangle) to the OS cursor.

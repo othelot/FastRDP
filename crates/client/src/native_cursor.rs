@@ -137,41 +137,56 @@ fn create_cursor(shape: &CursorShape, scale: f32) -> HCURSOR {
     }
 }
 
-/// Current remote pointer (None/invisible = show the local default pointer instead), the picture
-/// rectangle in client pixels and the remote->window pixel scale. Call from the UI thread.
-pub fn update(shape: Option<&CursorShape>, visible: bool, picture: Option<(i32, i32, i32, i32)>, scale: f32) {
+/// Current remote pointer, the picture rectangle in client pixels and the remote->window pixel
+/// scale. Call from the UI thread.
+///
+/// A remote pointer reported hidden is hidden over the picture too when `hide_hidden` (like mstsc
+/// with the RDP null pointer): Windows also reports it hidden while it draws the pointer into the
+/// picture itself (software cursor), and a local arrow on top of that made two pointers. Without
+/// `hide_hidden` (input through the agent: the session may have no mouse device, so Windows hides
+/// the pointer for good) the local default pointer is shown instead.
+pub fn update(shape: Option<&CursorShape>, visible: bool, picture: Option<(i32, i32, i32, i32)>, scale: f32, hide_hidden: bool) {
     let mut s = STATE.lock().unwrap();
     if s.hwnd.is_null() {
         return;
     }
     s.picture = picture;
-    let active = picture.is_some() && visible && shape.is_some();
-    if let (true, Some(shape)) = (active, shape) {
+    let before = CURRENT.load(Ordering::Acquire);
+    if let (Some(_), true, Some(shape)) = (picture, visible, shape) {
         let key = (shape.id, (scale * 1000.0) as u32);
         if s.key != Some(key) {
             let c = create_cursor(shape, scale);
             if !c.is_null() {
                 let old = std::mem::replace(&mut s.cursor, c);
-                CURRENT.store(c as isize, Ordering::Release);
+                if CURRENT.load(Ordering::Acquire) == old as isize {
+                    CURRENT.store(c as isize, Ordering::Release);
+                }
                 s.key = Some(key);
-                // SAFETY: old cursor no longer referenced (CURRENT replaced first).
+                // SAFETY: old cursor no longer referenced (CURRENT moved off it first).
                 if !old.is_null() {
                     unsafe { DestroyCursor(old) };
                 }
             }
         }
     }
-    let key_before = s.key;
-    let now_active = active && !s.cursor.is_null();
+    // the pointer over the picture: the remote shape, nothing (hidden), or winit's (inactive)
+    let want = match picture {
+        Some(_) if visible && shape.is_some() && !s.cursor.is_null() => Some(s.cursor),
+        Some(_) if !visible && hide_hidden => Some(std::ptr::null_mut()),
+        _ => None,
+    };
+    let now_active = want.is_some();
+    let cursor = want.unwrap_or(std::ptr::null_mut());
+    CURRENT.store(cursor as isize, Ordering::Release);
     let was = ACTIVE.swap(now_active, Ordering::AcqRel);
-    if was == now_active && (!now_active || shape.map(|c| c.id) == key_before.map(|k| k.0)) {
+    if was == now_active && (!now_active || before == cursor as isize) {
         return; // nothing changed: leave the pointer to WM_SETCURSOR
     }
     // apply immediately (shape change without a mouse move); else winit's next WM_SETCURSOR
     if now_active && over_picture(&s) {
-        // SAFETY: valid cursor handle, UI thread.
-        unsafe { SetCursor(s.cursor) };
-    } else if was && !ACTIVE.load(Ordering::Acquire) {
+        // SAFETY: valid cursor handle or null (hidden), UI thread.
+        unsafe { SetCursor(cursor) };
+    } else if was && !now_active {
         // hand the pointer back to winit (it re-applies its cursor on the next WM_SETCURSOR)
         // SAFETY: trivial.
         unsafe {
