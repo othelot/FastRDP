@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "protocol",
  "windows-sys 0.61.2",
@@ -653,7 +653,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "client"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "arboard",
  "bytes",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "encoder"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "openh264",
@@ -1347,7 +1347,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "frame-shm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -3155,14 +3155,14 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "protocol"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "provider"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "protocol",
  "windows 0.62.2",
@@ -3744,7 +3744,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bytes",
  "clap",
@@ -4368,7 +4368,7 @@ dependencies = [
 
 [[package]]
 name = "transport"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "reed-solomon-erasure",
 ]
@@ -4443,7 +4443,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "update"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.22.1",
  "clap",
