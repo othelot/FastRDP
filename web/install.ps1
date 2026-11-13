@@ -16,11 +16,14 @@ param(
     # also accept connections on networks Windows classifies as Public
     [switch]$AllowPublicNetwork,
     [ValidateSet('Keep', 'RdpCompatible', 'Native')][string]$ClsidMode = 'Keep',
-    [switch]$ReplaceForeignClsid
+    [switch]$ReplaceForeignClsid,
+    # internal: set by the non-elevated window, which shows what the elevated one writes here
+    [string]$ResultFile
 )
 
 function Invoke-FastRdpSetup {
-    param([switch]$Uninstall, [switch]$Yes, [switch]$Purge, [string]$AutoUpdate, [switch]$AllowPublicNetwork, [string]$ClsidMode, [switch]$ReplaceForeignClsid)
+    param([switch]$Uninstall, [switch]$Yes, [switch]$Purge, [string]$AutoUpdate, [switch]$AllowPublicNetwork, [string]$ClsidMode, [switch]$ReplaceForeignClsid,
+        [string]$ResultFile)
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell downloads are very slow with a progress bar
 
@@ -45,19 +48,28 @@ function Invoke-FastRdpSetup {
     if ([int]$cv.CurrentBuildNumber -lt 22000 -or $cv.InstallationType -ne 'Client') { throw 'FastRDP requires Windows 11.' }
     if ($cv.EditionID -like 'Core*') { throw "Windows 11 Home cannot host remote sessions; Pro, Enterprise or Education is required (this is $($cv.EditionID))." }
 
-    # ---- elevation: start the same version again in an elevated window
+    # ---- elevation: run the same version again in an elevated window and wait for it. It closes by
+    # itself when setup succeeds (the result is shown here) and stays open on an error.
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $admin) {
-        $cmd = "& ([scriptblock]::Create((irm '$selfUrl'))) -AutoUpdate $AutoUpdate"
+        $result = Join-Path $env:TEMP "fastrdp-setup-result-$PID.txt"
+        Remove-Item $result -ErrorAction SilentlyContinue
+        $cmd = "& ([scriptblock]::Create((irm '$selfUrl'))) -AutoUpdate $AutoUpdate -ResultFile '$($result -replace "'", "''")'"
         if ($Uninstall) { $cmd += ' -Uninstall' }
         if ($Yes) { $cmd += ' -Yes' }
         if ($Purge) { $cmd += ' -Purge' }
         if ($AllowPublicNetwork) { $cmd += ' -AllowPublicNetwork' }
         $cmd += " -ClsidMode $ClsidMode"
         if ($ReplaceForeignClsid) { $cmd += ' -ReplaceForeignClsid' }
+        $cmd = "try { $cmd } catch { Write-Host `$_ -ForegroundColor Red; Read-Host 'Setup failed. Press Enter to close'; exit 1 }"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
-        Write-Host 'Administrator rights are needed - opening an elevated PowerShell window ...'
-        Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -NoExit -EncodedCommand $enc"
+        Write-Host 'Administrator rights are needed - continuing in an elevated PowerShell window ...'
+        $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
+        if (Test-Path $result) {
+            Get-Content $result | ForEach-Object { Write-Host $_ }
+            Remove-Item $result -ErrorAction SilentlyContinue
+        }
+        elseif ($p.ExitCode -ne 0) { throw "Setup did not finish (log: $env:ProgramData\FastRDP\logs\setup.log)." }
         return
     }
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force   # the bundled scripts are files
@@ -91,6 +103,7 @@ function Invoke-FastRdpSetup {
             if (-not (Test-Path $script)) { $script = Join-Path (Get-Package) 'scripts\Uninstall-FastRdp.ps1' }
             & $script -Purge:$Purge
             Write-Host 'FastRDP removed.' -ForegroundColor Green
+            if ($ResultFile) { Set-Content $ResultFile 'FastRDP removed.' }
             return
         }
 
@@ -129,11 +142,15 @@ Everything is removed again with -Uninstall.
             $pkg = Get-Package
             & (Join-Path $pkg 'scripts\Install-FastRdp.ps1') -PackageDir $pkg -AutoUpdate $AutoUpdate @fw -ClsidMode $ClsidMode -ReplaceForeignClsid:$ReplaceForeignClsid
             $fp = Get-Content (Join-Path $env:ProgramData 'FastRDP\server\cert.sha256') -ErrorAction SilentlyContinue
-            Write-Host ''
-            Write-Host "FastRDP $version installed." -ForegroundColor Green
-            Write-Host "Server certificate SHA-256: $fp"
-            Write-Host 'Compare it with the fingerprint the client shows on the first connection.'
-            Write-Host "Client: $repo/releases/tag/v$version"
+            $done = @(
+                '',
+                "FastRDP $version installed.",
+                "Server certificate SHA-256: $fp",
+                'Compare it with the fingerprint the client shows on the first connection.',
+                "Client: $repo/releases/tag/v$version"
+            )
+            $done | ForEach-Object { Write-Host $_ }
+            if ($ResultFile) { Set-Content $ResultFile $done }
         }
         finally { Stop-Transcript | Out-Null }
     }
@@ -142,4 +159,5 @@ Everything is removed again with -Uninstall.
     }
 }
 
-Invoke-FastRdpSetup -Uninstall:$Uninstall -Yes:$Yes -Purge:$Purge -AutoUpdate $AutoUpdate -AllowPublicNetwork:$AllowPublicNetwork -ClsidMode $ClsidMode -ReplaceForeignClsid:$ReplaceForeignClsid
+Invoke-FastRdpSetup -Uninstall:$Uninstall -Yes:$Yes -Purge:$Purge -AutoUpdate $AutoUpdate -AllowPublicNetwork:$AllowPublicNetwork -ClsidMode $ClsidMode -ReplaceForeignClsid:$ReplaceForeignClsid `
+    -ResultFile $ResultFile
