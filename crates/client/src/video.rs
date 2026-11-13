@@ -80,16 +80,17 @@ impl<M> VideoView<M> {
     }
 
     /// Where to draw the pointer hotspot (remote pixels), or None when no pointer is shown.
+    /// With input, the pointer follows the local one and only while that is over the picture: off
+    /// it (letterbox bars, the full-screen connection bar on top) the local pointer is shown, and
+    /// drawing the remote one at its last position as well made two pointers.
     fn pointer_at(&self, bounds: Rectangle, cursor: mouse::Cursor) -> Option<(i32, i32)> {
         let pos = self.cursor_pos?;
         self.cursor_shape.as_ref()?;
         if !pos.visible {
             return None;
         }
-        if self.input.is_some()
-            && let Some((x, y)) = self.remote_pos(bounds, cursor)
-        {
-            return Some((x as i32, y as i32));
+        if self.input.is_some() {
+            return self.remote_pos(bounds, cursor).map(|(x, y)| (x as i32, y as i32));
         }
         Some((pos.x, pos.y))
     }
@@ -532,8 +533,11 @@ mod tests {
         // nothing known yet / position without shape
         assert_eq!(interaction(&view(None, None), over), iced::mouse::Interaction::default());
         assert_eq!(interaction(&view(visible, None), over), iced::mouse::Interaction::default());
-        // outside the picture: always the local pointer
-        assert_eq!(interaction(&view(visible, Some(shape)), outside), iced::mouse::Interaction::default());
+        // outside the picture: always the local pointer, and the remote one is not drawn as well
+        assert_eq!(interaction(&view(visible, Some(shape.clone())), outside), iced::mouse::Interaction::default());
+        let drawn =
+            |c| <super::VideoView<()> as Program<()>>::draw(&view(visible, Some(shape.clone())), &super::ViewState::default(), c, bounds).pointer.is_some();
+        assert!(drawn(over) && !drawn(outside), "one pointer at a time");
     }
 
     #[test]
