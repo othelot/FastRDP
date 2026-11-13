@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use protocol::{InputEvent, SCANCODE_PAUSE};
 use tokio::sync::mpsc::UnboundedSender;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_CANCEL, VK_HANGUL, VK_HANJA, VK_PAUSE};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_CANCEL, VK_HANGUL, VK_HANJA, VK_PAUSE, VK_RSHIFT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, SetWindowsHookExW, WH_KEYBOARD_LL,
 };
@@ -128,6 +128,9 @@ fn scancode(k: &KBDLLHOOKSTRUCT) -> Option<(u16, bool)> {
         VK_HANJA => (0xF1, false),
         // NumLock is reported with the extended flag; on the wire it is plain 0x45
         _ if k.scanCode == 0x45 => (0x45, false),
+        // so is Right Shift; E0 36 is the "fake shift" keyboards send around other keys, which
+        // Windows ignores - the session never saw Right Shift
+        VK_RSHIFT => (0x36, false),
         _ if k.scanCode == 0 || k.scanCode > 0xFF => return None,
         _ => (k.scanCode as u16, ext),
     })
@@ -223,6 +226,8 @@ mod tests {
         assert_eq!(scancode(&k(0x09, 0x0F, 0)), Some((0x0F, false)), "Tab");
         assert_eq!(scancode(&k(0x90, 0x45, LLKHF_EXTENDED)), Some((0x45, false)), "NumLock");
         assert_eq!(scancode(&k(VK_PAUSE, 0x45, 0)), Some((SCANCODE_PAUSE, false)));
+        assert_eq!(scancode(&k(VK_RSHIFT, 0x36, LLKHF_EXTENDED)), Some((0x36, false)), "Right Shift");
+        assert_eq!(scancode(&k(0xA0, 0x2A, 0)), Some((0x2A, false)), "Left Shift");
         assert_eq!(scancode(&k(VK_HANGUL, 0x72, 0)), Some((0xF2, false)));
         assert_eq!(scancode(&k(0xFF, 0, 0)), None);
     }
