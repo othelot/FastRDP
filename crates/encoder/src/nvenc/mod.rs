@@ -9,6 +9,7 @@
 //! * synchronous, P1..P7 preset with the ultra-low-latency tuning, CBR with a one-frame VBV,
 //!   no B-frames, infinite GOP (IDR only on request), SPS/PPS repeated with every IDR;
 //! * bitrate changes in place (`nvEncReconfigureEncoder`);
+//! * the rate control follows the frame intervals ([`rc_fps_for`]);
 //! * the H.264 level in the SPS is capped to 5.2 ([`cap_sps_level`]).
 pub mod sys;
 
@@ -16,6 +17,27 @@ pub mod sys;
 mod win;
 #[cfg(windows)]
 pub use win::Nvenc;
+
+/// Lowest frame rate the rate control is told: a frame after a longer pause gets the bits of
+/// 1/MIN_RC_FPS s (a large frame still has to cross the network in about that time).
+pub const MIN_RC_FPS: u32 = 10;
+
+/// Frame rate the rate control should assume for a frame `interval_us` after the previous one.
+///
+/// CBR gives every frame bitrate / frame rate. The encoder is set up for the session's refresh rate,
+/// but frames only come when the screen changes: an app drawing 13 fps on a 240 Hz session got 1/240
+/// of a second's bits per frame (1/18 of the bitrate; scrolling text fell apart). The rate is
+/// stepped down by 1.5x from the configured one (few reconfigurations) to the step at or just above
+/// the frame's own rate, never below MIN_RC_FPS: over time the stream uses the bitrate it was given.
+pub fn rc_fps_for(configured: u32, interval_us: i64) -> u32 {
+    let configured = configured.max(1);
+    let floor = (1e6 / interval_us.max(1) as f64).max(MIN_RC_FPS as f64);
+    let mut fps = configured as f64;
+    while fps / 1.5 >= floor {
+        fps /= 1.5;
+    }
+    (fps.round() as u32).clamp(1, configured)
+}
 
 /// Highest H.264 level (`level_idc`) OpenH264, the client's decoder, accepts.
 pub const MAX_LEVEL_IDC: u8 = 52;
@@ -43,6 +65,17 @@ pub fn cap_sps_level(au: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rate_control_follows_frame_intervals() {
+        use super::rc_fps_for;
+        assert_eq!(rc_fps_for(240, 4_167), 240, "frames at the refresh rate");
+        assert_eq!(rc_fps_for(240, 16_667), 71, "60 fps app: next step above 60");
+        assert_eq!(rc_fps_for(240, 76_923), 14, "13 fps console scroll");
+        assert_eq!(rc_fps_for(240, 2_000_000), 14, "after a pause: not below MIN_RC_FPS");
+        assert_eq!(rc_fps_for(60, 1_000), 60, "never above the configured rate");
+        assert_eq!(rc_fps_for(60, 100_000), 12);
+    }
+
     #[test]
     fn sps_level_is_capped() {
         // SPS (High, level 6.0) + PPS + IDR slice start

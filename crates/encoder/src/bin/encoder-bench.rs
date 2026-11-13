@@ -25,9 +25,15 @@ struct Cli {
     /// NVENC preset override: p1 .. p7
     #[arg(long)]
     preset: Option<String>,
-    /// Frame rate the encoder is configured for
+    /// Frame rate the encoder is configured for (the session's refresh rate)
     #[arg(long)]
     fps: Option<u32>,
+    /// Rate at which frames actually arrive (the remote app's frame rate; default: --fps)
+    #[arg(long)]
+    source_fps: Option<u32>,
+    /// Synthetic content: the whole screen is text scrolling up (a console) instead of a moving window
+    #[arg(long)]
+    scroll: bool,
     /// Target bitrate (kbps)
     #[arg(long)]
     bitrate_kbps: Option<u32>,
@@ -65,6 +71,25 @@ fn load_bmp(path: &str) -> (u32, u32, Vec<u8>) {
         out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&b[off + sy * w * 4..off + (sy + 1) * w * 4]);
     }
     (w as u32, hh as u32, out)
+}
+
+/// Full-screen text rows scrolling up by one row per frame, like a console printing output.
+fn synth_scroll(w: usize, h: usize, t: usize, out: &mut [u8]) {
+    const ROW: usize = 16;
+    for y in 0..h {
+        let line = y / ROW + t; // the text moves up one row per frame
+        let glyph_row = y % ROW;
+        for x in 0..w {
+            let col = x / 8;
+            // pseudo-random "characters" per (line, column), 8x16 cells with a 2-pixel gap
+            let seed = (line as u32).wrapping_mul(2_654_435_761) ^ (col as u32).wrapping_mul(40_503);
+            let len = (line * 37 % 90 + 10) * w / 100 / 8;
+            let ink = col < len && glyph_row < 13 && (x % 8) < 7 && (seed >> ((glyph_row + x % 8) % 24)) & 1 == 1;
+            let i = (y * w + x) * 4;
+            let v = if ink { 204 } else { 12 };
+            out[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
 }
 
 fn synth(base: &[u8], w: usize, h: usize, t: usize, out: &mut [u8]) {
@@ -174,12 +199,18 @@ fn main() {
     let (mut bytes, mut keys, mut decoded, mut psnr_sum, mut psnr_n) = (0usize, 0usize, 0usize, 0f64, 0usize);
     let mut by_encoder = std::collections::BTreeMap::<String, usize>::new();
     let wall = Instant::now();
+    let source_fps = cli.source_fps.unwrap_or(s.fps).max(1);
     for i in 0..frames {
-        synth(&base, w as usize, h as usize, i, &mut buf);
+        if cli.scroll {
+            synth_scroll(w as usize, h as usize, i, &mut buf);
+        } else {
+            synth(&base, w as usize, h as usize, i, &mut buf);
+        }
         if inject_at == Some(i) {
             enc.inject_runtime_failures(1);
         }
-        let f = Frame { width: w, height: h, stride: w as usize * 4, format: PixelFormat::Bgra, data: &buf, pts_us: (i as i64) * 1_000_000 / s.fps as i64 };
+        let f =
+            Frame { width: w, height: h, stride: w as usize * 4, format: PixelFormat::Bgra, data: &buf, pts_us: (i as i64) * 1_000_000 / source_fps as i64 };
         let t = Instant::now();
         let p = enc.encode(&f).expect("encode");
         times.push(t.elapsed().as_secs_f64() * 1e3);
@@ -196,7 +227,7 @@ fn main() {
         match dec.decode(&p.data) {
             Ok(Some(y)) => {
                 decoded += 1;
-                if i % 60 == 0 {
+                if i % 10 == 0 {
                     psnr_sum += psnr_y(&buf, w as usize, h as usize, &y);
                     psnr_n += 1;
                 }
@@ -218,8 +249,12 @@ fn main() {
         pct(1.0),
         1000.0 / avg
     );
-    let mbps = bytes as f64 * 8.0 / (frames as f64 / s.fps as f64) / 1e6;
+    let mbps = bytes as f64 * 8.0 / (frames as f64 / source_fps as f64) / 1e6;
     let psnr = if psnr_n > 0 { psnr_sum / psnr_n as f64 } else { 0.0 };
-    println!("bitrate {mbps:.1} Mbps @{}fps | keyframes {keys} | decoded {decoded}/{frames} (OpenH264 decoder) | PSNR-Y {psnr:.2} dB", s.fps);
+    println!(
+        "bitrate {mbps:.1} Mbps ({:.0} kbit/frame) @{source_fps}fps, encoder at {}fps | keyframes {keys} | decoded {decoded}/{frames} (OpenH264 decoder) | PSNR-Y {psnr:.2} dB",
+        bytes as f64 * 8.0 / 1000.0 / frames as f64,
+        s.fps
+    );
     println!("packets by encoder {by_encoder:?} | wall {wall_s:.2}s | final active={} fallback={}", enc.active(), enc.is_fallback());
 }

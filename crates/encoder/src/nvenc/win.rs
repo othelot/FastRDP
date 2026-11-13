@@ -229,6 +229,10 @@ pub struct Nvenc {
     width: u32,
     height: u32,
     fps: u32,
+    /// frame rate the rate control currently assumes (follows the frame intervals, see
+    /// `super::rc_fps_for`); None once NVENC refused to change it
+    rc_fps: Option<u32>,
+    last_pts: Option<i64>,
     frame_idx: u32,
     /// description without the bitrate
     desc: String,
@@ -266,6 +270,8 @@ impl Nvenc {
             width,
             height,
             fps: s.fps,
+            rc_fps: Some(s.fps),
+            last_pts: None,
             frame_idx: 0,
             desc: String::new(),
             kbps: s.bitrate_kbps,
@@ -416,6 +422,19 @@ impl Nvenc {
     }
 }
 
+impl Nvenc {
+    /// Changes bitrate and the frame rate the rate control assumes, in place (no IDR).
+    fn reconfigure(&mut self, kbps: u32, rc_fps: u32) -> bool {
+        set_rate(&mut self.config.rc_params, kbps, rc_fps);
+        self.init.frame_rate_num = rc_fps;
+        let mut re = sys::zeroed::<sys::ReconfigureParams>();
+        re.version = sys::RECONFIGURE_PARAMS_VER;
+        re.re_init_encode_params = *self.init;
+        re.re_init_encode_params.encode_config = &mut *self.config;
+        call!(self.api, reconfigure_encoder(self.enc, &mut *re)) == sys::SUCCESS
+    }
+}
+
 /// CBR at `kbps` with a one-frame VBV (lowest latency; frames do not queue in the network).
 fn set_rate(rc: &mut sys::RcParams, kbps: u32, fps: u32) {
     let bps = kbps.saturating_mul(1000);
@@ -455,12 +474,7 @@ impl Backend for Nvenc {
 
     fn set_bitrate(&mut self, kbps: u32) -> bool {
         let _ctx = self.cuda.bind();
-        set_rate(&mut self.config.rc_params, kbps, self.fps);
-        let mut re = sys::zeroed::<sys::ReconfigureParams>();
-        re.version = sys::RECONFIGURE_PARAMS_VER;
-        re.re_init_encode_params = *self.init;
-        re.re_init_encode_params.encode_config = &mut *self.config;
-        let ok = call!(self.api, reconfigure_encoder(self.enc, &mut *re)) == sys::SUCCESS;
+        let ok = self.reconfigure(kbps, self.rc_fps.unwrap_or(self.fps));
         if ok {
             self.kbps = kbps;
         }
@@ -472,6 +486,13 @@ impl Backend for Nvenc {
             return Err(EncodeError::InvalidInput("frame size changed".into()));
         }
         let _ctx = self.cuda.bind();
+        // frames come when the screen changes: give this one the bits of the time since the last
+        if let (Some(cur), Some(last)) = (self.rc_fps, self.last_pts.replace(f.pts_us)) {
+            let want = super::rc_fps_for(self.fps, f.pts_us - last);
+            if want != cur {
+                self.rc_fps = self.reconfigure(self.kbps, want).then_some(want);
+            }
+        }
         let (fmt, input, pitch) = self.upload(f)?;
         let mut pic = sys::zeroed::<sys::PicParams>();
         pic.version = sys::PIC_PARAMS_VER;
