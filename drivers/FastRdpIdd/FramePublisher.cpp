@@ -160,7 +160,7 @@ void FramePublisher::Heartbeat()
 
 void FramePublisher::PublishCursor(bool visible, int32_t x, int32_t y, const IDDCX_CURSOR_SHAPE_INFO* info, const uint8_t* shape)
 {
-    std::lock_guard<std::mutex> g(m_lock);
+    std::lock_guard<std::mutex> g(m_cursorLock);
     if (!m_pHeader) return;
     auto* c = reinterpret_cast<FastRdpShmCursor*>(m_pBase + FASTRDP_SHM_CURSOR_OFFSET);
     InterlockedIncrement64(&c->seq);                      // odd: writing

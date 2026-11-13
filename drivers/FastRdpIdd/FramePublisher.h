@@ -37,6 +37,11 @@ private:
     ~FramePublisher();
 
     std::mutex m_lock;
+    // The cursor block has its own lock: under m_lock a frame does its GPU copy, conversion and Map
+    // (waiting for the GPU) and the slot copy, and the cursor thread waited for all of that before it
+    // could answer the OS again - at 240 Hz on a busy GPU, over and over. m_pBase / m_pHeader are set
+    // once by Ensure, before any cursor thread exists.
+    std::mutex m_cursorLock;
     ULONG m_SessionId = 0xFFFFFFFF;
     HANDLE m_hSection = nullptr;
     HANDLE m_hEvent = nullptr;
