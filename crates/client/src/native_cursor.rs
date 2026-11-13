@@ -19,6 +19,8 @@ struct State {
     hwnd: HWND,
     /// picture rectangle in client pixels (x, y, w, h); None = not on the remote screen
     picture: Option<(i32, i32, i32, i32)>,
+    /// part of the picture covered by local controls (the full-screen connection bar)
+    excluded: Option<(i32, i32, i32, i32)>,
     /// (shape id, scaled size) of `cursor`
     key: Option<(u32, u32)>,
     cursor: HCURSOR,
@@ -27,7 +29,7 @@ struct State {
 // SAFETY: plain handles, used on the window thread under the mutex.
 unsafe impl Send for State {}
 
-static STATE: Mutex<State> = Mutex::new(State { hwnd: std::ptr::null_mut(), picture: None, key: None, cursor: std::ptr::null_mut() });
+static STATE: Mutex<State> = Mutex::new(State { hwnd: std::ptr::null_mut(), picture: None, excluded: None, key: None, cursor: std::ptr::null_mut() });
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CURRENT: AtomicIsize = AtomicIsize::new(0);
 
@@ -50,14 +52,14 @@ pub fn install(hwnd: isize) {
 }
 
 fn over_picture(s: &State) -> bool {
-    let Some((x, y, w, h)) = s.picture else { return false };
     let mut p = POINT { x: 0, y: 0 };
     // SAFETY: valid out pointer and window.
     unsafe {
         GetCursorPos(&mut p);
         ScreenToClient(s.hwnd, &mut p);
     }
-    p.x >= x && p.y >= y && p.x < x + w && p.y < y + h
+    let inside = |r: Option<(i32, i32, i32, i32)>| r.is_some_and(|(x, y, w, h)| p.x >= x && p.y >= y && p.x < x + w && p.y < y + h);
+    inside(s.picture) && !inside(s.excluded)
 }
 
 unsafe extern "system" fn subclass_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
@@ -137,22 +139,32 @@ fn create_cursor(shape: &CursorShape, scale: f32) -> HCURSOR {
     }
 }
 
-/// Current remote pointer, the picture rectangle in client pixels and the remote->window pixel
-/// scale. Call from the UI thread.
+/// Current remote pointer (`visible`: None = nothing known yet), the picture rectangle and the part
+/// of it covered by local controls, in client pixels, and the remote->window pixel scale. Call from
+/// the UI thread.
 ///
 /// A remote pointer reported hidden is hidden over the picture too when `hide_hidden` (like mstsc
 /// with the RDP null pointer): Windows also reports it hidden while it draws the pointer into the
 /// picture itself (software cursor), and a local arrow on top of that made two pointers. Without
 /// `hide_hidden` (input through the agent: the session may have no mouse device, so Windows hides
-/// the pointer for good) the local default pointer is shown instead.
-pub fn update(shape: Option<&CursorShape>, visible: bool, picture: Option<(i32, i32, i32, i32)>, scale: f32, hide_hidden: bool) {
+/// the pointer for good), or while nothing is known, the local default pointer is shown instead.
+pub fn update(
+    shape: Option<&CursorShape>,
+    visible: Option<bool>,
+    picture: Option<(i32, i32, i32, i32)>,
+    excluded: Option<(i32, i32, i32, i32)>,
+    scale: f32,
+    hide_hidden: bool,
+) {
     let mut s = STATE.lock().unwrap();
     if s.hwnd.is_null() {
         return;
     }
+    let moved = s.picture != picture || s.excluded != excluded;
     s.picture = picture;
+    s.excluded = excluded;
     let before = CURRENT.load(Ordering::Acquire);
-    if let (Some(_), true, Some(shape)) = (picture, visible, shape) {
+    if let (Some(_), Some(true), Some(shape)) = (picture, visible, shape) {
         let key = (shape.id, (scale * 1000.0) as u32);
         if s.key != Some(key) {
             let c = create_cursor(shape, scale);
@@ -170,23 +182,24 @@ pub fn update(shape: Option<&CursorShape>, visible: bool, picture: Option<(i32, 
         }
     }
     // the pointer over the picture: the remote shape, nothing (hidden), or winit's (inactive)
-    let want = match picture {
-        Some(_) if visible && shape.is_some() && !s.cursor.is_null() => Some(s.cursor),
-        Some(_) if !visible && hide_hidden => Some(std::ptr::null_mut()),
+    let want = match (picture, visible) {
+        (Some(_), Some(true)) if shape.is_some() && !s.cursor.is_null() => Some(s.cursor),
+        (Some(_), Some(false)) if hide_hidden => Some(std::ptr::null_mut()),
         _ => None,
     };
     let now_active = want.is_some();
     let cursor = want.unwrap_or(std::ptr::null_mut());
     CURRENT.store(cursor as isize, Ordering::Release);
     let was = ACTIVE.swap(now_active, Ordering::AcqRel);
-    if was == now_active && (!now_active || before == cursor as isize) {
+    if was == now_active && (!now_active || (before == cursor as isize && !moved)) {
         return; // nothing changed: leave the pointer to WM_SETCURSOR
     }
     // apply immediately (shape change without a mouse move); else winit's next WM_SETCURSOR
     if now_active && over_picture(&s) {
         // SAFETY: valid cursor handle or null (hidden), UI thread.
         unsafe { SetCursor(cursor) };
-    } else if was && !now_active {
+    } else if (was && !now_active) || (now_active && moved) {
+        // no longer ours here (inactive, or the picture / connection bar moved under the pointer)
         // hand the pointer back to winit (it re-applies its cursor on the next WM_SETCURSOR)
         // SAFETY: trivial.
         unsafe {

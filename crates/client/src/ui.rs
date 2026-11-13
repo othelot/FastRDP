@@ -18,6 +18,9 @@ use crate::known;
 use crate::session::{self, FrameSlot, InputCmd, SessionConfig, Stats, UntrustedCert, Update, VideoFrame};
 use crate::video::VideoView;
 
+/// Height of the strip at the top of the full-screen picture that brings the hidden connection bar back.
+const BAR_REVEAL_STRIP: f32 = 3.0;
+
 #[derive(Clone, Debug)]
 pub struct Form {
     pub server: String,
@@ -269,11 +272,23 @@ impl App {
             }
             _ => (None, 1.0),
         };
-        let visible = self.cursor_pos.map(|p| p.visible).unwrap_or(false);
+        // full screen: the connection bar (or, while it is hidden, the strip that brings it back)
+        // lies over the picture; there the pointer is the local one
+        let s = self.scale;
+        let top = self.fullscreen.then(|| {
+            let w = self.window_size.width;
+            if self.bar.visible || self.bar.pinned {
+                (((w - connbar::WIDTH) / 2.0 * s).round() as i32, 0, (connbar::WIDTH * s).round() as i32, (connbar::HEIGHT * s).round() as i32)
+            } else {
+                (0, 0, (w * s).round() as i32, (BAR_REVEAL_STRIP * s).ceil() as i32)
+            }
+        });
+        // None = nothing known about the remote pointer yet
+        let visible = self.cursor_pos.map(|p| p.visible);
         // session input devices: the session has a mouse, so "hidden" really is hidden (or drawn
         // into the picture by Windows) - see native_cursor::update
         let hide_hidden = self.input_path == Some(protocol::input_path::DEVICES);
-        crate::native_cursor::update(self.cursor_shape.as_deref(), visible, picture, ratio, hide_hidden);
+        crate::native_cursor::update(self.cursor_shape.as_deref(), visible, picture, top, ratio, hide_hidden);
     }
 
     /// macOS: hands the remote pointer (shape, visibility, picture rectangle) to the OS cursor.
@@ -1089,7 +1104,7 @@ fn view(app: &App) -> Element<'_, Message> {
                     container(bar).width(Length::Fill).align_x(Alignment::Center).into()
                 } else {
                     // hidden: the top edge brings it back
-                    mouse_area(container(text("")).width(Length::Fill).height(3)).on_enter(Message::BarReveal).into()
+                    mouse_area(container(text("")).width(Length::Fill).height(BAR_REVEAL_STRIP)).on_enter(Message::BarReveal).into()
                 };
                 return container(stack![video, top]).style(black).into();
             }
